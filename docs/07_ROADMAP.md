@@ -32,11 +32,11 @@
 - okplan-доки: `docs/07_ROADMAP.md`, `docs/STATUS.md`.
 
 **Критерии приёмки** (закрытие → tag `stage-0-done`):
-- [ ] `git status` не показывает секреты/клиентские файлы (`доступы*`, `материалы/`, `.env` игнорируются).
-- [ ] `npm install` проходит без ошибок.
-- [ ] `npm run db:migrate` подключается к БД `sbavito` и отрабатывает без ошибок (миграций пока нет — это ок).
-- [ ] Запуск пишет читаемый pino-лог на русском (подключение к Postgres/Redis).
-- [ ] `docs/STATUS.md` и `docs/07_ROADMAP.md` на месте, ссылаются друг на друга.
+- [x] `git status` не показывает секреты/клиентские файлы (`доступы*`, `материалы/`, `.env` игнорируются).
+- [x] `npm install` проходит без ошибок.
+- [x] `npm run db:migrate` подключается к БД `sbavito` и отрабатывает без ошибок (миграций пока нет — это ок).
+- [x] Запуск пишет читаемый pino-лог на русском (подключение к Postgres/Redis).
+- [x] `docs/STATUS.md` и `docs/07_ROADMAP.md` на месте, ссылаются друг на друга.
 
 ---
 
@@ -52,12 +52,12 @@
 - Сиды: 3 аккаунта (saunamart=goods, sbsauna=services, otdelka3=services/бюджет) + заглушка `prompt_base`.
 
 **Критерии приёмки** (закрытие → tag `stage-1-done`):
-- [ ] `npm run db:migrate` создаёт все таблицы и enum в БД `sbavito` без ошибок.
-- [ ] В БД присутствуют enum-типы `account_kind`, `availability`, `price_unit` с нужными значениями.
-- [ ] `npm run db:seed` заводит ровно 3 аккаунта; `SELECT code,kind FROM accounts` показывает saunamart/sbsauna/otdelka3.
-- [ ] `availability` по умолчанию `unknown` (пустой остаток ≠ «нет») — проверяется дефолтом колонки.
-- [ ] У `products` есть `search_vector` (tsvector) и GIN-индекс; повторный `db:seed` не плодит дубли аккаунтов.
-- [ ] Схема сгенерирована в миграцию (`drizzle/*.sql`), а не только `push` — миграции версионируются.
+- [x] `npm run db:migrate` создаёт все таблицы и enum в БД `sbavito` без ошибок.
+- [x] В БД присутствуют enum-типы `account_kind`, `availability`, `price_unit` с нужными значениями.
+- [x] `npm run db:seed` заводит ровно 3 аккаунта; `SELECT code,kind FROM accounts` показывает saunamart/sbsauna/otdelka3.
+- [x] `availability` по умолчанию `unknown` (пустой остаток ≠ «нет») — проверяется дефолтом колонки.
+- [x] У `products` есть `search_vector` (tsvector) и GIN-индекс; повторный `db:seed` не плодит дубли аккаунтов.
+- [x] Схема сгенерирована в миграцию (`drizzle/*.sql`), а не только `push` — миграции версионируются.
 
 ---
 
