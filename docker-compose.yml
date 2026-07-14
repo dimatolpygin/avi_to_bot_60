@@ -1,0 +1,28 @@
+# Инфраструктура для локальной разработки и CI.
+# На машине разработчика уже могут крутиться postgres16/redis на 5432/6379 —
+# тогда этот compose не нужен, .env указывает на них (создав БД sbavito).
+# Для чистой машины/CI: docker compose up -d, затем createdb sbavito.
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: sbavito
+    ports:
+      - '5432:5432'
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U postgres']
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - '6379:6379'
+
+volumes:
+  pgdata:
