@@ -18,7 +18,8 @@ stdlib logging + contextvars (лог на русском со сквозным r
 OpenRouter (`anthropic/claude-haiku-4.5`) · своя React-панель · Docker.
 
 ## Структура
-- `bot/` — приложение: `config.py`, `logger.py`, `db.py`, `cache.py`, `main.py`, `proverka.py`.
+- `bot/` — приложение: `config.py`, `logger.py`, `db.py`, `cache.py`, `models.py`, `seed.py`, `main.py`, `proverka.py`.
+- `migrations/` — миграции Alembic (схема `sbavito`, таблица версий там же).
 - `data/` — словари поиска, золотой набор запросов, выгрузки прайса.
 - `docs/07_ROADMAP.md` — дорожная карта по этапам, `docs/STATUS.md` — текущее состояние.
 
@@ -28,14 +29,23 @@ compose поднимает только приложение и ходит в н
 
 ```bash
 cp .env.example .env               # заполнить PG*, REDIS_URL, ключи
-docker compose up -d --build
+docker compose up -d --build       # entrypoint сам гонит alembic upgrade head
+docker compose exec app python -m bot.seed       # 3 аккаунта + заглушка промпта
 docker compose logs -f app                       # подключения и события на русском
-docker compose exec app python -m bot.proverka   # самопроверка каркаса и логов
+docker compose exec app python -m bot.proverka   # самопроверка: схема, логи, сквозной id
 docker compose exec app pytest                   # тесты
 ```
 
 Правка любого `.py` в `bot/` перезапускает процесс автоматически (watchmedo).
 `LOG_LEVEL=debug` добавляет в лог промпт и ответ модели.
+
+Работа со схемой:
+```bash
+docker compose exec app alembic revision --autogenerate -m "что меняем"
+docker compose exec app alembic upgrade head
+docker compose exec app alembic downgrade -1
+docker compose exec app alembic check              # есть ли дрейф моделей и БД
+```
 
 ## Ветки
 - `dev` — разработка. `master` — автодеплой (GitHub Actions), мерж только по явному решению.

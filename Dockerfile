@@ -18,9 +18,15 @@ RUN mkdir -p bot && touch bot/__init__.py \
 
 COPY bot ./bot
 COPY tests ./tests
+COPY alembic.ini ./
+COPY migrations ./migrations
+COPY docker ./docker
 
 # non-root
-RUN useradd --create-home app && chown -R app:app /app
+RUN useradd --create-home app && chown -R app:app /app \
+    && chmod +x /app/docker/entrypoint.sh
 USER app
 
+# Схема поднимается до старта приложения: контейнер сам догоняет миграции.
+ENTRYPOINT ["/app/docker/entrypoint.sh"]
 CMD ["python", "-m", "bot.main"]

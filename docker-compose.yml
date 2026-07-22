@@ -23,6 +23,7 @@ services:
       # Код монтируем — правка .py подхватывается автоперезагрузкой без пересборки.
       - ./bot:/app/bot
       - ./tests:/app/tests
+      - ./migrations:/app/migrations
       - ./data:/app/data
     # Автоперезагрузка в dev: watchmedo следит за bot/ и перезапускает процесс.
     # --debug-force-polling обязателен: правка файла на хосте Windows/macOS не

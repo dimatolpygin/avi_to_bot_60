@@ -13,6 +13,8 @@
 """
 import asyncio
 
+from sqlalchemy import text
+
 from .config import load_config
 from .logger import (DEBUG_LOGI, log_ishodyashchee, log_tool_call, log_vhodyashchee,
                      log_vyzov_ii, logger, nachat_zapros)
@@ -35,6 +37,22 @@ async def _demo_dialog(akkaunt: str, vopros: str) -> str:
         return rid
 
 
+async def _proverit_shemu(engine, shema: str) -> None:
+    """Схема поднята миграциями и засеяна: показываем ревизию, число таблиц
+    и аккаунты. Пусто → значит забыли `alembic upgrade head` или `bot.seed`."""
+    async with engine.connect() as conn:
+        revizia = (await conn.execute(text(
+            f'select version_num from "{shema}".alembic_version'))).scalar()
+        tablits = (await conn.execute(text(
+            "select count(*) from information_schema.tables where table_schema = :s"),
+            {"s": shema})).scalar_one()
+        akkaunty = (await conn.execute(text(
+            f'select code, kind from "{shema}".accounts order by id'))).all()
+    logger.info("🗄  Ревизия схемы: %s · таблиц: %s", revizia, tablits)
+    logger.info("🗄  Аккаунты: %s",
+                ", ".join(f"{c} ({k})" for c, k in akkaunty) or "нет — запусти python -m bot.seed")
+
+
 async def main() -> None:
     logger.info("🔎 Самопроверка каркаса")
     cfg = load_config()
@@ -44,6 +62,8 @@ async def main() -> None:
     engine = await db.podklyuchit(cfg)
     redis_client = await cache.podklyuchit(cfg)
     try:
+        await _proverit_shemu(engine, cfg.pg.schema)
+
         klyuch = f"{cache.PREFIKS}:proverka"
         await redis_client.set(klyuch, "живой", ex=60)
         znachenie = await redis_client.get(klyuch)

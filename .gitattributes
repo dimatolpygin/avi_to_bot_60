@@ -1,0 +1,5 @@
+# Shell-скрипты и entrypoint всегда с LF: на Windows git иначе положит CRLF,
+# и внутри контейнера `#!/bin/sh` превратится в «not found» на пустом месте.
+*.sh text eol=lf
+docker/entrypoint.sh text eol=lf
+Dockerfile text eol=lf
