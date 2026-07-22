@@ -23,12 +23,18 @@
 /0[1-6]_*.md
 /CLAUDE.md
 
-# Node / TypeScript
-node_modules/
-dist/
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
 build/
-*.tsbuildinfo
+dist/
 coverage/
+.coverage
 
 # Логи
 *.log

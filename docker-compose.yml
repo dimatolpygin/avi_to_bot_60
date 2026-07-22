@@ -1,28 +1,35 @@
-# Инфраструктура для локальной разработки и CI.
-# На машине разработчика уже могут крутиться postgres16/redis на 5432/6379 —
-# тогда этот compose не нужен, .env указывает на них (создав БД sbavito).
-# Для чистой машины/CI: docker compose up -d, затем createdb sbavito.
+# Имя проекта задано явно: по умолчанию compose берёт его из имени папки,
+# а она у нас кириллическая («авито») — compose такое имя не принимает.
+name: sbavito
+
+# Только сервис app. Postgres и Redis — СУЩЕСТВУЮЩИЕ контейнеры хоста
+# (postgres16 :5432 и redis :6379), свои не поднимаем: их образы делят
+# соседние проекты, менять их нельзя.
 services:
-  postgres:
-    image: postgres:16
+  app:
+    build: .
+    image: sbavito-app:latest
+    container_name: sbavito-app
+    env_file: .env
     environment:
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
-      POSTGRES_DB: sbavito
-    ports:
-      - '5432:5432'
+      # В .env адреса локальные (127.0.0.1) — из контейнера это он сам,
+      # поэтому переопределяем на шлюз хоста.
+      PGHOST: host.docker.internal
+      REDIS_URL: redis://host.docker.internal:6379/3
+    extra_hosts:
+      # На Docker Desktop имя есть само, на Linux-сервере его даёт эта строка.
+      - "host.docker.internal:host-gateway"
     volumes:
-      - pgdata:/var/lib/postgresql/data
-    healthcheck:
-      test: ['CMD-SHELL', 'pg_isready -U postgres']
-      interval: 5s
-      timeout: 5s
-      retries: 5
-
-  redis:
-    image: redis:7-alpine
-    ports:
-      - '6379:6379'
-
-volumes:
-  pgdata:
+      # Код монтируем — правка .py подхватывается автоперезагрузкой без пересборки.
+      - ./bot:/app/bot
+      - ./tests:/app/tests
+      - ./data:/app/data
+    # Автоперезагрузка в dev: watchmedo следит за bot/ и перезапускает процесс.
+    # --debug-force-polling обязателен: правка файла на хосте Windows/macOS не
+    # порождает inotify-событие внутри контейнера, и без опроса рестарта не будет.
+    command: >
+      watchmedo auto-restart
+      --directory /app/bot --pattern '*.py' --recursive
+      --debug-force-polling --signal SIGTERM
+      -- python -m bot.main
+    restart: unless-stopped
