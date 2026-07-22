@@ -1,15 +1,18 @@
 # -*- coding: utf-8 -*-
 """Чтение прайса клиента и валидация ДО похода в БД.
 
-Источник — лист **`table`** файла `Копия ИП Семенко ЕВ.xlsx`. Он единственный,
-где колонки названы `article, nomenclature, characteristics, price_apiece,
-price_per_meter`. В файле есть ещё `Лист24`, `Лист22`, `цены склад сауны`,
-`Липа` — те же товары в других единицах и с другими ценами. Смешение этих
-срезов и есть причина бага «бот выдаёт разные цены», поэтому берём один лист
-и только его.
+Источник правды — выгрузка гугл-таблицы заказчика **«Инфа по стройке для бота»**,
+лист Saunamart: 141 строка, колонки `article, nomenclature, characteristics,
+price_apiece, price_per_meter, Наличие`. Её заказчик ведёт руками и обновляет.
 
-Формат CSV с теми же заголовками тоже читается — на случай, если заказчик
-начнёт выгружать прайс отдельным файлом.
+⚠️ **Не путать со старым `Копия ИП Семенко ЕВ.xlsx`** (тоже лежит в `материалы/`).
+Это рабочая свалка на 13 листов, куда смотрел старый бот: там 229 строк, другие
+артикулы (`23405` против `123405`), другие цены (дверь 5609 против 11700), нет
+колонки наличия и вдобавок четыре разных среза одного ассортимента. Смешение
+этих срезов — и есть причина бага «бот выдаёт разные цены».
+
+Формат xlsx тоже читается (параметр `list_name` — имя листа): гугл-таблицу
+могут выгрузить и так.
 
 Главное правило модуля: **до записи в БД файл должен быть проверен целиком**.
 Битый или обрезанный прайс не должен ополовинить каталог — лучше упасть
@@ -26,15 +29,17 @@ from decimal import Decimal, InvalidOperation
 from ..logger import logger
 from .razbor import normalizovat
 
-LIST_PO_UMOLCHANIYU = "table"
-
 # Заголовки, без которых читать нечего.
 OBYAZATELNYE_KOLONKI = ("article", "nomenclature", "price_apiece")
-# Колонка наличия. В текущем файле её нет ни на одном листе — заказчик её пока
-# не ведёт. Если заведёт, ETL подхватит без правки кода.
+# Колонка наличия. Заказчик ведёт её сам: «Да» = есть, пусто = уточнить
+# у менеджера. Значения «Нет» в таблице не бывает.
 KOLONKA_NALICHIYA = ("наличие", "в наличии", "availability", "stock")
 
-# Меньше этого числа строк — файл почти наверняка обрезан. В прайсе 229 строк;
+# Заголовок в выгрузке гугл-таблицы стоит не первой строкой: сверху пустая
+# строка, а слева пустая колонка. Ищем строку с `article` в первых десяти.
+STROK_ISKAT_ZAGOLOVOK = 10
+
+# Меньше этого числа строк — файл почти наверняка обрезан. В прайсе 141 строка;
 # порог 50 отсекает аварию, но переживёт сокращение ассортимента вдвое.
 MINIMUM_STROK = 50
 
@@ -95,6 +100,19 @@ def _cena(v) -> Decimal | None:
 
 # ── Чтение ───────────────────────────────────────────────────────────────────
 
+def _nayti_zagolovok(syrye: list[list], put: str) -> int:
+    """Номер строки с заголовками. В выгрузке гугл-таблицы сверху пустая строка,
+    поэтому «заголовок — первая строка» тут не работает."""
+    for i, stroka in enumerate(syrye[:STROK_ISKAT_ZAGOLOVOK]):
+        if any(v is not None and normalizovat(v).lower() == "article" for v in stroka):
+            return i
+    raise OshibkaPraysa(
+        f"❌ В прайсе «{put}» не нашёл строку заголовков: ни в одной из первых "
+        f"{STROK_ISKAT_ZAGOLOVOK} строк нет колонки `article`.\n"
+        f"   Проверь, что выгружен нужный лист таблицы «Инфа по стройке для бота»."
+    )
+
+
 def _indeksy_kolonok(zagolovok: list, put: str) -> dict[str, int]:
     """Сопоставить заголовки файла с нужными колонками. Нет обязательной —
     падаем сразу, до чтения строк."""
@@ -119,7 +137,7 @@ def _indeksy_kolonok(zagolovok: list, put: str) -> dict[str, int]:
     return naydeno
 
 
-def _syrye_stroki_xlsx(put: str, list_name: str) -> list[list]:
+def _syrye_stroki_xlsx(put: str, list_name: str | None) -> list[list]:
     try:
         import openpyxl
     except ImportError as e:                                   # pragma: no cover
@@ -131,7 +149,9 @@ def _syrye_stroki_xlsx(put: str, list_name: str) -> list[list]:
         raise OshibkaPraysa(f"❌ Не удалось открыть прайс «{put}»: {e}")
 
     try:
-        if list_name not in wb.sheetnames:
+        if list_name is None:
+            list_name = wb.sheetnames[0]
+        elif list_name not in wb.sheetnames:
             raise OshibkaPraysa(
                 f"❌ В прайсе «{put}» нет листа «{list_name}».\n"
                 f"   Листы в файле: {', '.join(wb.sheetnames)}."
@@ -153,12 +173,12 @@ def _syrye_stroki_csv(put: str) -> list[list]:
         return [list(r) for r in csv.reader(f, dialekt)]
 
 
-def prochitat(put: str, list_name: str = LIST_PO_UMOLCHANIYU) -> Prays:
+def prochitat(put: str, list_name: str | None = None) -> Prays:
     """Прочитать файл и проверить его целиком. Любая беда → `OshibkaPraysa`."""
     if not os.path.isfile(put):
         raise OshibkaPraysa(
             f"❌ Файл прайса не найден: «{put}».\n"
-            f"   Проверь путь; в контейнере прайс лежит в /app/data/."
+            f"   Свежую выгрузку клади в материалы/прайс/ — она монтируется в контейнер."
         )
 
     rasshirenie = os.path.splitext(put)[1].lower()
@@ -167,10 +187,11 @@ def prochitat(put: str, list_name: str = LIST_PO_UMOLCHANIYU) -> Prays:
     if not syrye:
         raise OshibkaPraysa(f"❌ Прайс «{put}» пуст — ни одной строки.")
 
-    kolonki = _indeksy_kolonok(syrye[0], put)
+    nomer_zagolovka = _nayti_zagolovok(syrye, put)
+    kolonki = _indeksy_kolonok(syrye[nomer_zagolovka], put)
     est_nalichie = "nalichie" in kolonki
-    logger.info("📄 Прайс «%s», лист «%s»: колонка наличия %s",
-                os.path.basename(put), list_name,
+    logger.info("📄 Прайс «%s»: заголовок в строке %d, колонка наличия %s",
+                os.path.basename(put), nomer_zagolovka + 1,
                 "есть" if est_nalichie else "ОТСУТСТВУЕТ — всё пойдёт как «наличие неизвестно»")
 
     def yacheyka(stroka: list, klyuch: str):
@@ -179,7 +200,7 @@ def prochitat(put: str, list_name: str = LIST_PO_UMOLCHANIYU) -> Prays:
 
     stroki: list[StrokaPraysa] = []
     bez_ceny = bez_nazvaniya = 0
-    for nomer, syraya in enumerate(syrye[1:], start=2):
+    for nomer, syraya in enumerate(syrye[nomer_zagolovka + 1:], start=nomer_zagolovka + 2):
         art = _artikul(yacheyka(syraya, "article"))
         if not art:
             continue                                   # хвост пустых строк листа

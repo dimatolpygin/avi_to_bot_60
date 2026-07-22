@@ -62,12 +62,21 @@ def test_skobki_ne_iz_razmera_ne_schitayutsya_rabochey_shirinoy():
 
 
 def test_fasovka_uznaetsya_a_litry_ne_fasovka():
-    assert razobrat("Фольга алюминиевая Алукрафт 12 м2").is_package is True
-    assert razobrat("Камни Жадеит колотый фр 40-70 мм уп.10кг. (Хакасия)").is_package is True
-    assert razobrat("Камни Габбро-диабаз средний 20кг Карелия").is_package is True
+    assert razobrat("Фольга алюминиевая 12 м2 80мкм").is_package is True
+    assert razobrat("Камни Жадеит колотый фр 80-130 мм уп.10кг. (Хакасия)").is_package is True
+    assert razobrat("Камни Габбро-диабаз мелкий 20кг Карелия").is_package is True
     # 35 л — объём изделия, а не упаковка: делить цену нельзя, но и пометка неверна.
     assert razobrat("Обливное устройство Учар песчаный сланец 35 л").is_package is False
     assert razobrat("Вагонка Липа сорт А 15х95 (88) L-2.5 м").is_package is False
+
+
+def test_shtuk_v_upakovke_eto_ne_fasovka():
+    """«6 шт/уп» — сколько штук в пачке, а цена всё равно за штуку: у этой
+    позиции 693 ₽/шт при 289 ₽/м на 2.4 м. Пометить упаковкой = заставить бота
+    сказать «делить нельзя» там, где делить как раз нужно."""
+    r = razobrat("Вагонка ольха STS сорт Экстра 15х88 (80) L-2.4 м (6 шт/уп)")
+    assert r.is_package is False
+    assert r.working_width_mm == 80 and r.length_m == Decimal("2.4")
 
 
 def test_dver_vysota_vsegda_bolshe_shiriny():
@@ -126,8 +135,9 @@ def test_shtuchnaya_poziciya_ne_stanovitsya_mernoy():
 
 
 def test_mernaya_poziciya_bez_kolonki_ceny_za_metr_vse_ravno_mernaya():
-    """У 16 позиций файла есть длина, но колонка price_per_meter пуста —
-    единицу определяем по длине, иначе они станут «штучными»."""
+    """Единицу определяем по длине в названии, а не по заполненности колонки
+    price_per_meter: колонку заказчик может не заполнить, и позиция молча
+    станет «штучной» — бот перестанет называть цену за метр погонный."""
     d = _polya_pozicii(_stroka("11213", "Наличник Липа сорт Экстра 15х70 L-2.2 м", "387"))
     assert d["unit"] == "linear_m" and d["price_per_m"] == Decimal("175.91")
 
@@ -140,10 +150,18 @@ def test_bez_kolonki_nalichiya_vse_neizvestno():
     assert _nalichie(None) == "unknown"
 
 
-def test_kolonka_nalichiya_chitaetsya_esli_poyavitsya():
+def test_pustaya_yacheyka_eto_ne_net_a_neizvestno():
+    """Правило заказчика: «Да» = есть, пусто = уточнить у менеджера.
+    Считать пустую ячейку за «нет» — это и есть баг старого бота, который
+    отвечал «необрезной нет», хотя она была в прайсе."""
+    assert _nalichie("") == "unknown"
+    assert _nalichie("   ") == "unknown"
+
+
+def test_kolonka_nalichiya_chitaetsya():
     assert _nalichie("Да") == "in_stock"
-    assert _nalichie("нет") == "out"
-    assert _nalichie("") == "out"        # пусто ведёт заказчик как «нет»
+    assert _nalichie("да") == "in_stock"
+    assert _nalichie("нет") == "out"     # в таблице не встречается, но читаем
     assert _nalichie("3") == "in_stock"
     assert _nalichie("0") == "out"
     assert _nalichie("ерунда") == "unknown"
