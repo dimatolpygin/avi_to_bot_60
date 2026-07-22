@@ -19,6 +19,8 @@ OpenRouter (`anthropic/claude-haiku-4.5`) · своя React-панель · Dock
 
 ## Структура
 - `bot/` — приложение: `config.py`, `logger.py`, `db.py`, `cache.py`, `models.py`, `seed.py`, `main.py`, `proverka.py`.
+- `bot/etl/` — импорт прайса: `chtenie.py` (прочитать и проверить файл), `razbor.py`
+  (атрибуты из названия), `import_prays.py` (upsert по артикулу одной транзакцией).
 - `migrations/` — миграции Alembic (схема `sbavito`, таблица версий там же).
 - `data/` — словари поиска, золотой набор запросов, выгрузки прайса.
 - `docs/07_ROADMAP.md` — дорожная карта по этапам, `docs/STATUS.md` — текущее состояние.
@@ -35,6 +37,16 @@ docker compose logs -f app                       # подключения и с�
 docker compose exec app python -m bot.proverka   # самопроверка: схема, логи, сквозной id
 docker compose exec app pytest                   # тесты
 ```
+
+Импорт прайса (идемпотентный, ключ синхронизации — артикул):
+```bash
+docker compose exec app python -m bot.etl.import_prays                 # файл по умолчанию
+docker compose exec app python -m bot.etl.import_prays <файл> <аккаунт>
+docker compose exec app python -m bot.etl.import_prays --tolko-razbor  # прогон без БД
+```
+`--tolko-razbor` показывает, что распозналось из названий, и ничего не пишет в БД —
+им проверяют правки разбора на живом файле. Повторный импорт того же файла обязан дать
+0 добавлено / 0 обновлено; исчезнувшая из прайса позиция гасится, но остаётся в каталоге.
 
 Правка любого `.py` в `bot/` перезапускает процесс автоматически (watchmedo).
 `LOG_LEVEL=debug` добавляет в лог промпт и ответ модели.
