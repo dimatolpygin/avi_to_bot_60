@@ -175,11 +175,19 @@ def test_u_kamney_net_kvadratnogo_metra(poisk):
 
 
 def test_pustaya_vydacha_razlichaet_kanaly(poisk):
+    """Чужой домен закрывает тему, «не найдено» — НЕ закрывает.
+
+    Решение заказчика 24.07: банное, которого нет в прайсе, не повод отшить
+    клиента. Прайс это не весь ассортимент, часть возим под заказ, поэтому
+    ответ здесь — «уточню и вернусь», а не «у нас такого нет».
+    """
     chuzhoy = agent.payload_poiska([], "чужой домен", "")
     net_takogo = agent.payload_poiska([], "не найдено", "")
     assert chuzhoy["найдено"] == []
     assert "не наш профиль" in chuzhoy["пометка"]
-    assert "наш профиль" in net_takogo["пометка"]
+    assert "ПРО НАШ ПРОФИЛЬ" in net_takogo["пометка"]
+    assert "НЕ отшивай" in net_takogo["пометка"]
+    assert "уточнишь у поставщика" in net_takogo["пометка"]
     assert chuzhoy["пометка"] != net_takogo["пометка"]
 
 
