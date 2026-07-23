@@ -121,6 +121,40 @@ async def test_agent_bez_promta_i_bez_poiska_padaet_ponyatno():
         await agent.otvetit(CFG, None, [], "привет")
 
 
+async def test_povtornoe_privetstvie_snimaetsya_kodom(monkeypatch):
+    """Баг живого прогона 23.07: на /start клиент получает стартовое сообщение
+    из брифа, а на первый же вопрос бот здоровается второй раз. Промптом это
+    не лечится — модель не узнаёт своё приветствие в чужой формулировке."""
+    fake = FakeChat(["Здравствуйте, это Александра из Saunamart. Есть вагонка липа и полок."])
+    monkeypatch.setattr(agent, "chat", fake)
+    istoriya = [{"role": "assistant",
+                 "content": "Вас приветствует компания Saunamart. Меня зовут Александра."}]
+    r = await agent.otvetit(CFG, None, istoriya, "что есть у вас?",
+                            sistemny="тестовый промпт")
+    assert r.otvet == "Есть вагонка липа и полок."
+
+
+async def test_pervoe_privetstvie_ostaetsya(monkeypatch):
+    """В пустом диалоге здороваться нужно — на Авито первый контакт идёт
+    не через /start, а сразу с вопроса клиента."""
+    fake = FakeChat(["Здравствуйте, это Александра из Saunamart. Есть вагонка липа."])
+    monkeypatch.setattr(agent, "chat", fake)
+    r = await agent.otvetit(CFG, None, [], "что есть?", sistemny="тестовый промпт")
+    assert r.otvet.startswith("Здравствуйте")
+
+
+def test_snyatie_privetstviya_ne_treplet_smysl():
+    from bot.ai.stil import snyat_privetstvie
+
+    # Приветствие только в начале реплики и только первым предложением.
+    assert snyat_privetstvie("Добрый день! Липа есть.") == "Липа есть."
+    assert snyat_privetstvie("Липа есть, 513 рублей.") == "Липа есть, 513 рублей."
+    assert (snyat_privetstvie("Менеджер перезвонит и скажет: здравствуйте, это Saunamart.")
+            == "Менеджер перезвонит и скажет: здравствуйте, это Saunamart.")
+    # Если кроме приветствия ничего нет, пустое сообщение хуже лишнего «здравствуйте».
+    assert snyat_privetstvie("Здравствуйте!") == "Здравствуйте!"
+
+
 def test_prompt_saunamart_ne_izmenilsya_posle_vynosa_stilya():
     """Правила стиля вынесены в общую функцию — текст промпта Saunamart
     обязан остаться прежним, иначе этап 8 надо перепроверять заново."""

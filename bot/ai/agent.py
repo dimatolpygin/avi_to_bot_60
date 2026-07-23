@@ -29,7 +29,7 @@ from ..search.katalog import Katalog
 from ..search.search import Nahodka, Poisk, cena_za_metr_kvadratnyy
 from ..search.slovari import slovari
 from .openrouter import chat
-from .stil import ochistit_otvet
+from .stil import ochistit_otvet, snyat_privetstvie
 
 ITERACIY = 4          # хватает на «поиск → ответ» с запасом на уточнение
 TOP_TOCHECHNY = 8     # обычный вопрос про товар
@@ -145,8 +145,9 @@ def pravila_stilya(imya: str, kompaniya: str, *, zhenskiy_rod: bool = True,
 - Без эмодзи. Без канцелярита: не «в наличии имеется», «осуществляется», а «есть», «привезём».
 - Без заискивания («отличный вопрос», «прекрасный выбор») и без конструкций «не просто X, а Y».
 - Поздоровайся и представься РОВНО один раз, в начале диалога, так: «Здравствуйте, это
-  {imya} из {kompaniya}». Не «привет»: с покупателем мы на «вы». Если выше в переписке
-  ты уже {zdorovalas}, просто отвечай по существу.{pozicii}
+  {imya} из {kompaniya}». Не «привет»: с покупателем мы на «вы». Если в переписке выше
+  есть хоть одна твоя реплика, ты уже {zdorovalas} — даже когда она сформулирована
+  другими словами. Тогда здороваться второй раз НЕЛЬЗЯ, сразу отвечай по существу.{pozicii}
 
 ПРО КОНТАКТ:
 - Телефон {pervoy} НЕ проси. Никогда. Сначала помоги с выбором и ответь на вопрос.
@@ -213,6 +214,12 @@ def _boltovnya(tekst: str) -> bool:
 
 def _zadala_vopros(tekst: str) -> bool:
     return "?" in tekst
+
+
+def _bot_uzhe_govoril(istoriya: list[dict]) -> bool:
+    """Была ли в этом диалоге хоть одна реплика бота — включая приветствие,
+    отправленное транспортом в обход модели."""
+    return any(z.get("role") == "assistant" for z in istoriya)
 
 
 # ── Инструмент ───────────────────────────────────────────────────────────────
@@ -428,6 +435,12 @@ async def otvetit(cfg: OpenRouterConfig, poisk: Poisk | None, istoriya: list[dic
             continue
 
         otvet = ochistit_otvet(otvet)
+        # Бот уже говорил в этом диалоге — второе «здравствуйте» снимаем кодом.
+        # Промпт это не гарантирует: на `/start` уходит стартовое сообщение из
+        # брифа, модель не узнаёт в нём предписанную формулировку и здоровается
+        # заново. Проверено на живом диалоге 23.07.
+        if _bot_uzhe_govoril(istoriya):
+            otvet = snyat_privetstvie(otvet)
         return OtvetAgenta(
             otvet=otvet,
             istoriya=[*istoriya,
