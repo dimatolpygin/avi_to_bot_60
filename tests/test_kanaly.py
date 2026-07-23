@@ -66,7 +66,22 @@ def test_orientiry_cen_raznye_u_dvuh_akkauntov_uslug():
     assert "350 тысяч" in profil("sbsauna_deshman").prompt
     # Дешман готов продать материалы, основной аккаунт — нет: разные правила.
     assert "не продаём" in profil("sbsauna").prompt
-    assert "продать материалы отдельно" in profil("sbsauna_deshman").prompt
+    assert "МАТЕРИАЛЫ ОТДЕЛЬНО мы продать можем" in profil("sbsauna_deshman").prompt
+
+
+def test_uslugam_zapreshcheno_schitat_obemy_i_sroki():
+    """Главный дефект прогона 23.07: бот считал вслух то, чего не знает.
+
+    Обещал «40-45 кубометров вагонки на 480-675 тысяч» при реальных 0.35 м³ —
+    ошибка в сто раз, и сумма выше, чем вся парная под ключ у него же.
+    """
+    for kod in ("sbsauna", "sbsauna_deshman"):
+        p = profil(kod).prompt
+        assert "ЧЕГО ТЫ НЕ ЗНАЕШЬ" in p, kod
+        assert "кубометры" in p, kod
+        assert "сколько дней, недель или месяцев" in p, kod
+        # Ориентир «от» нельзя пересчитывать под размеры клиента.
+        assert "не умножай на его размеры" in p, kod
 
 
 def test_privetstvie_est_u_vseh_i_nazyvaet_personu():
