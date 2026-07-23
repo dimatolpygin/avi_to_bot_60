@@ -151,6 +151,24 @@ def _v_diapazone(v: Decimal) -> Decimal | None:
     return v if DLINA_MIN <= v <= DLINA_MAX else None
 
 
+def _metry_slengom(qn: str, stemy: frozenset[str], sl: Slovari) -> Decimal | None:
+    """Метры, названные словами: «два метра», «трёхметровая», «два сорок».
+
+    Живёт отдельной функцией, потому что нужно двум разным разборам: ДЛИНЕ
+    мерных семейств и ВЫСОТЕ двери. Baseline этапа 7 поймал ровно этот разрыв:
+    «дверь 2000х700» разбиралась, «дверь два метра» — нет. Цифры искала
+    регулярка габарита, а слова знал только словарь длин, до которого дверь
+    не доходила, потому что длины у дверей не бывает.
+    """
+    for st in stemy:
+        if st in sl.dlina_stem:
+            return Decimal(str(sl.dlina_stem[st]))
+    for fraza, v in sl.dlina_fraza:
+        if fraza in qn:
+            return Decimal(str(v))
+    return None
+
+
 def _dlina(qn: str, stemy: frozenset[str], sl: Slovari,
            semeystvo: str | None) -> Decimal | None:
     """Длина в метрах. Разбирается только для мерных семейств (или когда
@@ -162,12 +180,9 @@ def _dlina(qn: str, stemy: frozenset[str], sl: Slovari,
     if m:
         return _v_diapazone(Decimal(m.group(1).replace(",", ".")))
 
-    for st in stemy:
-        if st in sl.dlina_stem:
-            return Decimal(str(sl.dlina_stem[st]))
-    for fraza, v in sl.dlina_fraza:
-        if fraza in qn:
-            return Decimal(str(v))
+    slengom = _metry_slengom(qn, stemy, sl)
+    if slengom is not None:
+        return slengom
 
     m = _RE_DLINA_METRY.search(qn)
     if m:
@@ -188,7 +203,7 @@ def _dlina(qn: str, stemy: frozenset[str], sl: Slovari,
     return None
 
 
-def _gabarit_dveri(qn: str, sl: Slovari) -> tuple[int | None, int | None]:
+def _gabarit_dveri(qn: str, stemy: frozenset[str], sl: Slovari) -> tuple[int | None, int | None]:
     """Высота и ширина двери в мм. Высота двери всегда больше ширины — на этом
     и разбираем, а не на порядке чисел: в прайсе он гуляет («1900х700»
     у одних, «680*1890» у других)."""
@@ -205,12 +220,16 @@ def _gabarit_dveri(qn: str, sl: Slovari) -> tuple[int | None, int | None]:
     for slovo, (v, sh) in sl.dver_gabarit.items():
         if slovo in qn:
             return v, sh
-    # «дверь два метра» — это высота 2000 мм, а не длина: у дверей длины нет.
+    # «дверь 2 метра» и «дверь два метра» — это высота 2000 мм, а не длина:
+    # у дверей длины нет. Цифрами её пишет регулярка, словами — словарь длин.
+    metry = None
     m = _RE_DLINA_METRY.search(qn)
     if m:
         metry = Decimal(m.group(1).replace(",", "."))
-        if Decimal("1.8") <= metry <= Decimal("2.2"):
-            return int(metry * 1000), None
+    else:
+        metry = _metry_slengom(qn, stemy, sl)
+    if metry is not None and Decimal("1.8") <= metry <= Decimal("2.2"):
+        return int(metry * 1000), None
     return None, None
 
 
@@ -233,7 +252,7 @@ def razobrat_zapros(tekst: str, sl: Slovari | None = None) -> RazobranyZapros:
     obem = None
     moshchnost = None
     if semeystvo == "дверь":
-        vysota, shirina = _gabarit_dveri(qn, sl)
+        vysota, shirina = _gabarit_dveri(qn, stemy, sl)
     if semeystvo == "печь" or semeystvo is None:
         m = _RE_OBEM.search(qn)
         if m:

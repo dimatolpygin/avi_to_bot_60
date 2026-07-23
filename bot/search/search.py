@@ -46,13 +46,18 @@ VES_SEMEYSTVA = 3.0          # семейство названо/резолвл�
 VES_RODOVOGO = 3.0           # семейство «по умолчанию» в родовом канале
 VES_NAZVANIYA = 3.0          # слово из названия товара («тундра», «жадеит»)
 VES_ATRIBUT_SOVPAL = 4.0     # сорт, порода, длина, габарит, объём
-# Названный атрибут — жёсткий фильтр, а не пожелание: несовпавшее должно уйти
-# НИЖЕ порога, а не просто вниз списка. «Спросили сорт Б — показали А» (371
-# против 513 ₽) и «спросили 1900х700 — показали 2000х800» это ровно тот баг
-# старого бота, из-за которого его и меняют. 4.0 при пороге 2.0 гасит совсем.
-SHTRAF_SORT = 4.0
-SHTRAF_PORODA = 3.0          # абаши против липы это втрое по цене
-SHTRAF_CHISLOVOGO = 4.0      # габарит двери, объём парной, мощность
+# Названный атрибут — жёсткий фильтр, а не пожелание: несовпавшее выбрасывается
+# из выдачи совсем. «Спросили сорт Б — показали А» (371 против 513 ₽) и
+# «спросили 1900х700 — показали 2000х800» это ровно тот баг старого бота,
+# из-за которого его и меняют.
+#
+# Раньше здесь стоял штраф −4.0 при пороге 2.0, и предполагалось, что этого
+# хватит. Baseline этапа 7 показал, что нет: у «вагонка липа сорт а» позиция
+# сорта В получала −4.0 за сорт, но +4.0 за совпавшую породу и +1.2 за каждый
+# общий стем — и всплывала обратно. Штраф гасит только тогда, когда других
+# сигналов мало; отбор атрибутом обязан работать всегда, поэтому он больше
+# не балл, а фильтр.
+#
 # Длина — единственное мягкое исключение: соседняя длина это ТОТ ЖЕ товар,
 # и честнее показать его с пометкой «спрошенной длины нет», чем промолчать.
 SHTRAF_DLINA = 1.0
@@ -142,7 +147,7 @@ class Poisk:
 
         utochnyayushchie = self._utochnyayushchie(z, kandidaty)
         ocenennye = [self._ocenit(g, z, kanal, utochnyayushchie) for g in kandidaty]
-        ocenennye = [n for n in ocenennye if n.ball >= PORG_BALLA]
+        ocenennye = [n for n in ocenennye if n is not None and n.ball >= PORG_BALLA]
         ocenennye.sort(key=lambda n: -n.ball)
 
         if not ocenennye:
@@ -194,7 +199,13 @@ class Poisk:
     # ── Скоринг ──────────────────────────────────────────────────────────────
 
     def _ocenit(self, g: Gruppa, z: RazobranyZapros, kanal: str,
-                utochnyayushchie: set[str]) -> Nahodka:
+                utochnyayushchie: set[str]) -> Nahodka | None:
+        """Балл товара или None, если названный клиентом атрибут не совпал.
+
+        None — это не «ноль баллов», а «в выдачу не идёт ни при каких условиях»:
+        см. комментарий у SHTRAF_DLINA о том, почему отбор атрибутом сделан
+        фильтром, а не штрафом.
+        """
         s = 0.0
         obrazec = g.obrazec
 
@@ -207,9 +218,13 @@ class Poisk:
             s += VES_NAZVANIYA
 
         if z.sort:
-            s += VES_ATRIBUT_SOVPAL if g.grade == z.sort else -SHTRAF_SORT
+            if g.grade != z.sort:
+                return None
+            s += VES_ATRIBUT_SOVPAL
         if z.poroda:
-            s += VES_ATRIBUT_SOVPAL if g.species == z.poroda else -SHTRAF_PORODA
+            if g.species != z.poroda:
+                return None
+            s += VES_ATRIBUT_SOVPAL
 
         pozitsiya, dlina_sovpala = obrazec, True
         if z.dlina_m is not None:
@@ -222,12 +237,19 @@ class Poisk:
                 dlina_sovpala = False
 
         if z.dver_vysota_mm:
-            s += self._ball_dveri(obrazec, z)
+            ball = self._ball_dveri(obrazec, z)
+            if ball is None:
+                return None
+            s += ball
         if z.obem_m3:
-            s += self._ball_obema(obrazec, z.obem_m3)
+            ball = self._ball_obema(obrazec, z.obem_m3)
+            if ball is None:
+                return None
+            s += ball
         if z.moshchnost_kvt:
-            svoya = obrazec.attrs.get("moshchnost_kvt")
-            s += VES_ATRIBUT_SOVPAL if svoya == z.moshchnost_kvt else -SHTRAF_CHISLOVOGO
+            if obrazec.attrs.get("moshchnost_kvt") != z.moshchnost_kvt:
+                return None
+            s += VES_ATRIBUT_SOVPAL
 
         for w in utochnyayushchie:
             if soft_has(set(g.stemy), w):
@@ -239,23 +261,26 @@ class Poisk:
 
         return Nahodka(gruppa=g, ball=s, pozitsiya=pozitsiya, dlina_sovpala=dlina_sovpala)
 
-    def _ball_dveri(self, p: Pozitsiya, z: RazobranyZapros) -> float:
-        """Габарит двери. Высота без ширины («дверь два метра») — половина
-        сигнала: 2000 отсекает 1900-е, но между 700 и 800 не выбирает."""
+    def _ball_dveri(self, p: Pozitsiya, z: RazobranyZapros) -> float | None:
+        """Габарит двери; None — размер не тот, позиция выбывает.
+
+        Высота без ширины («дверь два метра») — половина сигнала: 2000 отсекает
+        1900-е, но между 700 и 800 не выбирает."""
         vysota = p.attrs.get("dver_vysota_mm")
         shirina = p.attrs.get("dver_shirina_mm")
         if vysota is None:
             return 0.0
+        if vysota != z.dver_vysota_mm:
+            return None
         if z.dver_shirina_mm is None:
-            return VES_ATRIBUT_SOVPAL / 2 if vysota == z.dver_vysota_mm else -SHTRAF_CHISLOVOGO
-        if vysota == z.dver_vysota_mm and shirina == z.dver_shirina_mm:
-            return VES_ATRIBUT_SOVPAL
-        return -SHTRAF_CHISLOVOGO
+            return VES_ATRIBUT_SOVPAL / 2
+        return VES_ATRIBUT_SOVPAL if shirina == z.dver_shirina_mm else None
 
-    def _ball_obema(self, p: Pozitsiya, nuzhno: int) -> float:
+    def _ball_obema(self, p: Pozitsiya, nuzhno: int) -> float | None:
         """Объём парной задан ИНТЕРВАЛОМ («от 14 до 18 м³»), поэтому матчим
         попаданием в диапазон, а не равенством — это единственное место, где
         перенос весов из telewin заведомо не работал бы как есть.
+        Не попали в интервал — None, позиция выбывает.
 
         Плюс близость к середине диапазона: под «16 кубов» и Тундра-16 (ровно 16),
         и Легион 6–16 формально подходят, но клиент имел в виду первую.
@@ -267,7 +292,7 @@ class Poisk:
         nizhe = omin if omin is not None else omax
         vyshe = omax if omax is not None else omin
         if not (nizhe <= nuzhno <= vyshe):
-            return -SHTRAF_CHISLOVOGO
+            return None
         centr = (nizhe + vyshe) / 2
         blizost = max(0.0, 1.0 - abs(centr - nuzhno) / 10)
         return VES_ATRIBUT_SOVPAL + VES_BLIZOSTI_OBEMA * blizost
