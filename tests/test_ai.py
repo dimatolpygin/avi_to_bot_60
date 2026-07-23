@@ -128,7 +128,8 @@ def test_pustoe_nalichie_eto_utochnyu_a_ne_net(poisk):
     """Главный баг старого бота: пустая ячейка прайса читалась как «нет»."""
     nahodki, kanal = poisk.iskat("фольга")
     p = agent.payload_poiska(nahodki, kanal, "")["найдено"][0]
-    assert p["наличие"] == "уточню у менеджера"
+    # «У менеджера» из уст менеджера — перевод стрелок на самого себя (24.07).
+    assert p["наличие"] == "уточню на складе"
     assert "нет" not in p["наличие"]
 
 
@@ -409,3 +410,68 @@ def test_telefon_normalizuetsya():
     assert normalizovat_telefon(None) is None
     # Не похоже на телефон — отдаём как есть, чтобы менеджер увидел, что написал клиент.
     assert normalizovat_telefon("напишите в вотсап") == "напишите в вотсап"
+
+
+# ── Предохранитель: выпрашивание телефона ────────────────────────────────────
+
+
+@pytest.mark.parametrize("syroy, zhdem", [
+    # Живой диалог 24.07: посчитал заказ и тут же попросил номер.
+    ("Пять штук метровой липы сорт А по 110 рублей, это 550 рублей. Оставите номер телефона?",
+     "Пять штук метровой липы сорт А по 110 рублей, это 550 рублей."),
+    ("Скидку уточню. Напишите ваш телефон, пожалуйста.", "Скидку уточню."),
+    ("Посчитаем точно. Как с вами связаться?", "Посчитаем точно."),
+    ("Нужен ваш номер телефона, чтобы подготовить варианты. Липа есть трёх сортов.",
+     "Липа есть трёх сортов."),
+])
+def test_proshba_telefona_vyrezaetsya(syroy, zhdem):
+    from bot.ai.stil import snyat_proshbu_telefona
+
+    chistyy, vyrezano = snyat_proshbu_telefona(syroy)
+    assert chistyy == zhdem
+    assert vyrezano
+
+
+@pytest.mark.parametrize("tekst", [
+    # Подтверждение уже полученного контакта — не просьба.
+    "Спасибо, записала ваш номер. Мы свяжемся с вами сегодня.",
+    "Позвоним вам на этот номер после обеда.",
+    "Липа сорт А есть, 513 рублей за трёхметровую штуку. Какая длина нужна?",
+    # Если кроме просьбы в реплике ничего нет, пустое сообщение хуже просьбы.
+    "Оставите номер телефона?",
+])
+def test_proshba_telefona_ne_lovit_lishnego(tekst):
+    from bot.ai.stil import snyat_proshbu_telefona
+
+    assert snyat_proshbu_telefona(tekst) == (tekst, None)
+
+
+@pytest.mark.asyncio
+async def test_agent_ne_vypraszivaet_telefon(poisk, cfg, monkeypatch):
+    """Промпт запрещает это трижды и всё равно не удержал — держит код."""
+    fake = FakeChat([
+        {"content": "Пять штук по 110 рублей, это 550 рублей. Оставите номер телефона?",
+         "tool_calls": None},
+    ])
+    monkeypatch.setattr(agent, "chat", fake)
+    r = await agent.otvetit(cfg, poisk, [{"role": "assistant", "content": "Здравствуйте."}],
+                            "мне 5 штук метровой")
+    assert "550 рублей" in r.otvet
+    assert "телефон" not in r.otvet.lower()
+
+
+@pytest.mark.asyncio
+async def test_posle_lida_pro_nomer_govorit_mozhno(poisk, cfg, monkeypatch):
+    """Клиент контакт уже дал: подтверждение и уточнение по номеру — не выпрашивание."""
+    fake = FakeChat([
+        _vyzov_lida("89001234567"),
+        {"content": "Спасибо, записала ваш номер. Мы свяжемся с вами сегодня.",
+         "tool_calls": None},
+    ])
+    monkeypatch.setattr(agent, "chat", fake)
+
+    async def peredat(telefon, imya, vyzhimka):
+        return None
+
+    r = await agent.otvetit(cfg, poisk, [], "мой номер 89001234567", peredat_lead=peredat)
+    assert "записала ваш номер" in r.otvet
