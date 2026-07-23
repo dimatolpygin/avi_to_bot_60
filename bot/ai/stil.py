@@ -118,14 +118,34 @@ _PROSBA_BEZ_SLOVA = re.compile(
     r"куда\s+(вам\s+)?(позвонить|написать))", re.I)
 
 
-def snyat_proshbu_telefona(tekst: str) -> tuple[str, str | None]:
-    """Убрать из ответа просьбу дать телефон. → (текст, что вырезали).
+def est_proshba_telefona(tekst: str) -> bool:
+    """Есть ли в реплике просьба дать контакт. Нужна, чтобы понять, просили ли
+    уже раньше в этом диалоге: один раз можно, второй — нет."""
+    if not tekst:
+        return False
+    for i, ch in enumerate(_PO_PREDLOZHENIYAM.split(tekst)):
+        if i % 2 == 0 and _eto_proshba(ch):
+            return True
+    return False
 
-    Главная болячка старого бота: он клянчил контакт вместо ответа на вопрос
-    (баг №1 из `04_баги_старого_бота.md`). Промпт запрещает это трижды, и всё
-    равно на живом диалоге 24.07 бот закончил реплику «Оставите номер телефона?».
-    Запрет такого класса держится кодом, а не послушанием модели, — как и запрет
-    на второе «здравствуйте».
+
+def _eto_proshba(predlozhenie: str) -> bool:
+    return bool((_PRO_KONTAKT.search(predlozhenie) and _PROSBA.search(predlozhenie))
+                or _PROSBA_BEZ_SLOVA.search(predlozhenie))
+
+
+def snyat_proshbu_telefona(tekst: str) -> tuple[str, str | None]:
+    """Убрать из ответа ПОВТОРНУЮ просьбу дать телефон. → (текст, что вырезали).
+
+    Тонкий баланс, и обе крайности плохи. Клянчить контакт вместо ответа —
+    баг №1 старого бота (`04_баги_старого_бота.md`). Но не спросить вообще —
+    значит не получить лид: клиент думает, что уже говорит с менеджером
+    в чате, и телефон ему оставлять незачем. Тогда в amoCRM не уйдёт ничего,
+    а ради этого всё и делается.
+
+    Поэтому спросить можно РОВНО ОДИН раз за переписку, когда клиент созрел.
+    Момент выбирает модель по промпту, а код держит счёт: решает не эта функция,
+    а вызывающий — он смотрит, просили ли уже в истории диалога.
 
     Режем ровно предложение с просьбой, остальной ответ остаётся: клиенту нужен
     ответ про товар, а не пустое сообщение. Если кроме просьбы в реплике ничего
@@ -136,9 +156,7 @@ def snyat_proshbu_telefona(tekst: str) -> tuple[str, str | None]:
     chasti = _PO_PREDLOZHENIYAM.split(tekst)
     ostalos, vyrezano = [], []
     for i, ch in enumerate(chasti):
-        prosit = ((_PRO_KONTAKT.search(ch) and _PROSBA.search(ch))
-                  or _PROSBA_BEZ_SLOVA.search(ch))
-        if i % 2 == 0 and prosit:
+        if i % 2 == 0 and _eto_proshba(ch):
             vyrezano.append(ch.strip())
             continue
         ostalos.append(ch)
