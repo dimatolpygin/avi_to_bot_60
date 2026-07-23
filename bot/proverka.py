@@ -7,7 +7,8 @@
   3. лог одного «входящего сообщения» сшит одним request-id по всей цепочке
      👤 → 🔧 → 🧠 → 🤖, а у следующего сообщения id уже другой;
   4. при `LOG_LEVEL=debug` в цепочке появляются промпт и ответ модели,
-     на `info` — не появляются.
+     на `info` — не появляются;
+  5. словари домена (этап 5) читаются с диска и резолвят живые формулировки.
 Диалога и ИИ на этом этапе ещё нет, поэтому цепочка — демонстрационная,
 с теми же помощниками логирования, которыми будет пользоваться боевое ядро.
 """
@@ -18,6 +19,7 @@ from sqlalchemy import text
 from .config import load_config
 from .logger import (DEBUG_LOGI, log_ishodyashchee, log_tool_call, log_vhodyashchee,
                      log_vyzov_ii, logger, nachat_zapros)
+from .search.zapros import razobrat_zapros
 from . import cache, db
 
 
@@ -53,11 +55,19 @@ async def _proverit_shemu(engine, shema: str) -> None:
                 ", ".join(f"{c} ({k})" for c, k in akkaunty) or "нет — запусти python -m bot.seed")
 
 
+def _proverit_slovari() -> None:
+    """Словари домена читаются и резолвят живые формулировки (этап 5).
+    БД для этого не нужна — разбор запроса детерминирован и работает офлайн."""
+    for vopros in ("вагонка сорт б", "трёхметровая липа", "болгарка"):
+        logger.info("📚 %r → %s", vopros, razobrat_zapros(vopros).kratko())
+
+
 async def main() -> None:
     logger.info("🔎 Самопроверка каркаса")
     cfg = load_config()
     logger.info("⚙️  Конфиг прочитан: БД %s, схема «%s», модель %s",
                 cfg.pg.bez_parolya(), cfg.pg.schema, cfg.openrouter.model)
+    _proverit_slovari()
 
     engine = await db.podklyuchit(cfg)
     redis_client = await cache.podklyuchit(cfg)
