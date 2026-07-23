@@ -58,7 +58,10 @@ def _setup() -> logging.Logger:
     lg.setLevel(_uroven())
     h = logging.StreamHandler(sys.stdout)  # stdout — основной сток (docker logs)
     h.setFormatter(logging.Formatter(_FORMAT, datefmt=_DATEFMT))
-    h.addFilter(_KontekstFilter())
+    # Фильтр висит на ЛОГГЕРЕ, а не на хендлере: так аккаунт и rid попадают
+    # в саму запись и видны любому, кто её читает, — включая тесты, которые
+    # проверяют сквозной id, не разбирая отформатированную строку.
+    lg.addFilter(_KontekstFilter())
     lg.addHandler(h)
     lg.propagate = False
     return lg
@@ -127,6 +130,33 @@ def log_ishodyashchee(username, text: str, *, ms: int | None = None, meta: str =
     """Исходящий ответ бота клиенту."""
     hvost = f" за {ms}мс" if ms is not None else ""
     logger.info(f"🤖 → @{username or '—'}{hvost}: {text}{(' ' + meta) if meta else ''}")
+
+
+def _soobshcheniy(n: int) -> str:
+    """«2 сообщения», «5 сообщений» — лог читает человек, склонения важны."""
+    hvost = n % 100
+    if 11 <= hvost <= 14:
+        return "сообщений"
+    return {1: "сообщение", 2: "сообщения", 3: "сообщения", 4: "сообщения"}.get(n % 10, "сообщений")
+
+
+def log_sklejka(skolko: int, tekst: str) -> None:
+    """Дебаунс склеил несколько быстрых сообщений клиента в один вопрос."""
+    logger.info(f"🧵 склейка: {skolko} {_soobshcheniy(skolko)} → один ответ | {tekst}")
+
+
+def log_pauza(chto: str, sekund: float, *, meta: str = "") -> None:
+    """Живая задержка перед действием. Пишем КАЖДУЮ и с точностью до десятых:
+    по логу должно быть видно, что паузы плавающие, а не фиксированный таймер."""
+    hvost = f" ({meta})" if meta else ""
+    logger.info(f"⏳ {chto} {sekund:.1f} с{hvost}")
+
+
+def log_preryvanie(otpravleno: int, vsego: int) -> None:
+    """Клиент написал новое, пока мы отвечали: остаток реплик отменён.
+    В историю диалога уходит только реально отправленное — иначе бот «помнит»
+    несказанное и на следующем ходу ссылается на него."""
+    logger.info(f"✂️ прервано новым сообщением: отправлено {otpravleno} из {vsego} реплик")
 
 
 def log_oshibka(chto: str, *, zapros: str = "") -> None:
