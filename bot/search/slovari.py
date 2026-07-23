@@ -98,9 +98,12 @@ class Slovari:
             for i, variant in enumerate(sem.varianty):
                 if not variant or not variant <= st:
                     continue
-                # i == 0 — это сам ключ семейства, самый надёжный сигнал.
-                kanal = "точно" if i == 0 else "синоним"
-                ves = 2 if i == 0 else 1
+                # i == 0 — имя семейства, i == 1 — его канон: и то и другое
+                # «точно». «Синоним» остаётся за народными формами («полог»,
+                # «каменка»), чтобы по каналу в логе было видно, что сработал
+                # именно словарь сленга, а не собственное имя товара.
+                kanal = "точно" if i <= 1 else "синоним"
+                ves = 2 if i <= 1 else 1
                 kandidat = (len(variant), ves, klyuch, kanal)
                 if luchshee is None or kandidat > luchshee:
                     luchshee = kandidat
