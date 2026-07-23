@@ -1,0 +1,56 @@
+# -*- coding: utf-8 -*-
+"""Постобработка стиля ответа (этап 8).
+
+**Тире «—» и markdown чистим КОДОМ, а не промптом.** Промпт задаёт тон,
+но гарантии не даёт: модель всё равно иногда проставит длинное тире или
+`**жирный**`, даже когда прямо запрещено. Это правило заказчика, и держится
+оно на регэкспах, а не на послушании модели.
+
+Чистится не только то, что уходит клиенту, но и то, что ложится в историю
+диалога: иначе на следующем ходу модель скопирует собственный прежний формат
+и вернёт разметку обратно.
+
+Что НЕ трогаем: цифры. Постобработка работает с готовым текстом реплики,
+цены приходят из инструмента и правятся только там.
+"""
+from __future__ import annotations
+
+import re
+
+# «10 — 15» → «10-15»: между числами тире значит диапазон, и запятая его сломает.
+_TIRE_MEZHDU_CHISEL = re.compile(r"(\d)\s*[—–]\s*(\d)")
+_TIRE_MEZHDU_SLOV = re.compile(r"\s*[—–]\s*")
+_ZHIRNYY = re.compile(r"\*\*(.+?)\*\*|__(.+?)__")
+_KURSIV = re.compile(r"(?<!\*)\*(?!\s)(.+?)(?<!\s)\*(?!\*)")
+_ZAGOLOVOK = re.compile(r"^\s{0,3}#{1,6}\s*", re.M)
+_MARKER_SPISKA = re.compile(r"^\s{0,3}(?:[-*•]|\d{1,2}[.)])\s+", re.M)
+# Пустая строка внутри реплики — это разбиение на абзацы, то есть карточка товара,
+# а не сообщение в мессенджере. Модель делает так вопреки промпту, поэтому склеиваем
+# кодом: абзацы становятся строками одного ответа.
+_PUSTYE_STROKI = re.compile(r"\n\s*\n+")
+_PROBELY = re.compile(r"[ \t]{2,}")
+
+# Эмодзи: основные диапазоны пиктограмм. Метки логов (👤 🔧 🧠 🤖) сюда не попадают —
+# они живут в логе, а не в тексте реплики.
+_EMODZI = re.compile(
+    "[\U0001F300-\U0001FAFF\U00002600-\U000027BF\U0001F1E6-\U0001F1FF️⭐❤]")
+
+
+def ochistit_otvet(tekst: str) -> str:
+    """Убрать тире, markdown и эмодзи, вернуть живой текст. Идемпотентна."""
+    if not tekst:
+        return tekst
+    tekst = _TIRE_MEZHDU_CHISEL.sub(r"\1-\2", tekst)
+    tekst = _TIRE_MEZHDU_SLOV.sub(", ", tekst)
+    tekst = _ZHIRNYY.sub(lambda m: m.group(1) or m.group(2), tekst)
+    tekst = _KURSIV.sub(r"\1", tekst)
+    tekst = _ZAGOLOVOK.sub("", tekst)
+    tekst = _MARKER_SPISKA.sub("", tekst)
+    tekst = _EMODZI.sub("", tekst)
+    # Подчистка артефактов замены тире на запятую.
+    tekst = re.sub(r"^\s*,\s*", "", tekst, flags=re.M)
+    tekst = re.sub(r"\s+,", ",", tekst)
+    tekst = re.sub(r",\s*,", ",", tekst)
+    tekst = _PUSTYE_STROKI.sub("\n", tekst)
+    tekst = _PROBELY.sub(" ", tekst)
+    return tekst.strip()
