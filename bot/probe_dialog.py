@@ -33,6 +33,7 @@ from .chelovek.dispetcher import Kanal, PamyatVPamyati
 from .chelovek.razbivka import Tempo
 from .config import load_config
 from .core import Yadro
+from .db import podklyuchit, sozdat_fabriku_sessiy, zakryt
 from .profili import PROFILI
 
 
@@ -55,7 +56,16 @@ async def progon(kod: str, repliki: list[str], *, pachkoy: bool, uskorenie: floa
                  chat: str = "probe") -> int:
     cfg = load_config()
     yadro = Yadro(cfg, PamyatVPamyati(), tempo=Tempo().uskorit(uskorenie))
-    await yadro.podgotovit([kod])
+    # БД поднимаем по-настоящему: лид, который клиент оставил в прогоне, обязан
+    # долететь до `sbavito.leads`, иначе проверять нечего. Не поднялась — работаем
+    # на файле прайса, как и живой бот.
+    engine = None
+    try:
+        engine = await podklyuchit(cfg)
+        fabrika = sozdat_fabriku_sessiy(engine)
+    except SystemExit:
+        fabrika = None
+    await yadro.podgotovit([kod], fabrika)
 
     privet = await yadro.zapomnit_privetstvie(kod, chat)
     print(f"\n=== {kod} ===\n  [  0.0с] 🤖 {privet}   [приветствие /start]\n", flush=True)
@@ -75,6 +85,7 @@ async def progon(kod: str, repliki: list[str], *, pachkoy: bool, uskorenie: floa
             zadachi.clear()
     await yadro.dispetcher(kod).dozhdatsya()
     await yadro.ostanovit()
+    await zakryt(engine)
 
     print(f"\n  Итого реплик бота: {len(kanal.repliki)}", flush=True)
     return 0

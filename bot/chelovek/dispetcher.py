@@ -46,9 +46,13 @@ class Kanal:
     imya: str = "—"          # для лога: @username или id чата
 
 
-#: Как получить ответ: (вопрос клиента, история диалога) → текст ответа.
+#: Как получить ответ: (вопрос клиента, история диалога, ключ диалога) → текст.
 #: История — список `{"role": ..., "content": ...}`, как её ждёт `bot.ai.agent`.
-Otvetchik = Callable[[str, list[dict]], Awaitable[str]]
+#:
+#: Ключ (`аккаунт:чат`) нужен отвечающему, чтобы передать лид менеджеру: контакт
+#: без диалога, к которому он привязан, менеджеру бесполезен. Диспетчер сам
+#: ничего с ключом не делает — просто отдаёт тому, кто знает, что с ним делать.
+Otvetchik = Callable[[str, list[dict], str], Awaitable[str]]
 
 
 class Pamyat(Protocol):
@@ -217,7 +221,7 @@ class Dispetcher:
             # Вопрос кладём в память ДО генерации: клиент его действительно
             # задал, и отмена нашего ответа этого не отменяет.
             await self.pamyat.dopisat(k, "user", vopros)
-            otvet = await self._otvetchik(vopros, istoriya)
+            otvet = await self._otvetchik(vopros, istoriya, k)
             if not otvet.strip():
                 raise ValueError("отвечающий вернул пустой текст")
 

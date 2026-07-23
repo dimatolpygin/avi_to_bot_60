@@ -6,6 +6,7 @@
 сборка payload для инструмента, чистка стиля и **предохранители** — та часть,
 ради которой агент вообще написан кодом, а не одним промптом.
 """
+import json
 from decimal import Decimal
 
 import pytest
@@ -236,7 +237,9 @@ async def test_otkaz_bez_poiska_forsiruet_poisk(poisk, cfg, monkeypatch):
     monkeypatch.setattr(agent, "chat", fake)
     r = await agent.otvetit(cfg, poisk, [], "вагонка липа есть?")
     assert r.forsirovan_poisk
-    assert fake.vyzovy == ["auto", "required", "auto"]
+    # Форсируем именно поиск, а не «любой инструмент»: с появлением save_lead
+    # значение "required" разрешило бы модели вместо прайса передать лид.
+    assert fake.vyzovy == ["auto", agent.FORSIROVAT_POISK, "auto"]
     assert "513" in r.otvet
 
 
@@ -252,7 +255,7 @@ async def test_utochnenie_bez_poiska_forsiruet_poisk(poisk, cfg, monkeypatch):
     monkeypatch.setattr(agent, "chat", fake)
     r = await agent.otvetit(cfg, poisk, [], "почём вагонка липа")
     assert r.forsirovan_poisk
-    assert fake.vyzovy[1] == "required"
+    assert fake.vyzovy[1] == agent.FORSIROVAT_POISK
 
 
 @pytest.mark.asyncio
@@ -320,3 +323,89 @@ def test_prompt_soderzhit_klyuchevye_pravila(poisk):
     for pravilo in ("Сорт Б", "Телефон первой НЕ проси", "рабочей ширине",
                     "Александра", "квадратный метр"):
         assert pravilo in prompt, f"из промпта пропало правило: {pravilo}"
+
+
+# ── Передача лида менеджеру ──────────────────────────────────────────────────
+
+
+def _vyzov_lida(telefon: str, imya: str | None = None,
+                vyzhimka: str = "Клиент спрашивал вагонку липа сорт А") -> dict:
+    # Ключи схемы ЛАТИНСКИЕ: Anthropic отвергает кириллицу в именах свойств
+    # инструмента («Property keys should match ^[a-zA-Z0-9_.-]{1,64}$») и валит
+    # ЛЮБОЙ запрос с таким tools — то есть весь диалог, а не только лид.
+    args = {"telefon": telefon, "vyzhimka": vyzhimka}
+    if imya:
+        args["imya"] = imya
+    return {"content": None, "tool_calls": [{
+        "id": "9", "type": "function",
+        "function": {"name": "save_lead", "arguments": json.dumps(args, ensure_ascii=False)}}]}
+
+
+@pytest.mark.asyncio
+async def test_lead_uhodit_s_vyzhimkoy(poisk, cfg, monkeypatch):
+    """Менеджеру нужен не голый номер, а о чём был разговор: переписку он
+    не читал. Выжимку пишет модель тем же вызовом — диалог у неё в контексте."""
+    fake = FakeChat([
+        _vyzov_lida("8 900 123-45-67", "Игорь", "Нужна вагонка липа сорт А, 3 метра, парная 2х3"),
+        {"content": "Спасибо, передала менеджеру, он свяжется.", "tool_calls": None},
+    ])
+    monkeypatch.setattr(agent, "chat", fake)
+    peredannye = []
+
+    async def peredat(telefon, imya, vyzhimka):
+        peredannye.append((telefon, imya, vyzhimka))
+
+    r = await agent.otvetit(cfg, poisk, [], "мой номер 8 900 123-45-67",
+                            peredat_lead=peredat)
+    assert r.lead_peredan
+    assert peredannye == [("8 900 123-45-67", "Игорь",
+                           "Нужна вагонка липа сорт А, 3 метра, парная 2х3")]
+
+
+@pytest.mark.asyncio
+async def test_lead_bez_telefona_ne_peredaetsya(poisk, cfg, monkeypatch):
+    """Инструмент зовут только на реальный номер: без него передавать нечего,
+    а «передал» в логе означало бы лид, которого нет."""
+    fake = FakeChat([
+        _vyzov_lida(""),
+        {"content": "Что вас интересует?", "tool_calls": None},
+    ])
+    monkeypatch.setattr(agent, "chat", fake)
+    peredannye = []
+
+    async def peredat(telefon, imya, vyzhimka):
+        peredannye.append(telefon)
+
+    r = await agent.otvetit(cfg, poisk, [], "перезвоните мне", peredat_lead=peredat)
+    assert peredannye == []
+    assert r.lead_peredan is False
+
+
+@pytest.mark.asyncio
+async def test_padenie_bd_ne_royaet_dialog(poisk, cfg, monkeypatch):
+    """Лид дороже всего, но оборвать из-за него живой диалог — хуже: клиент
+    получит ответ, а ошибка уйдёт в лог целиком."""
+    fake = FakeChat([
+        _vyzov_lida("89001234567"),
+        {"content": "Спасибо, менеджер свяжется.", "tool_calls": None},
+    ])
+    monkeypatch.setattr(agent, "chat", fake)
+
+    async def padaet(telefon, imya, vyzhimka):
+        raise RuntimeError("Postgres лёг")
+
+    r = await agent.otvetit(cfg, poisk, [], "мой номер 89001234567", peredat_lead=padaet)
+    assert "менеджер" in r.otvet.lower()
+    assert r.lead_peredan is False
+
+
+def test_telefon_normalizuetsya():
+    """Один человек с двумя записями номера — это два лида в amo, а не один."""
+    from bot.lead import normalizovat_telefon
+
+    assert normalizovat_telefon("8 (900) 123-45-67") == "+79001234567"
+    assert normalizovat_telefon("+7 900 123 45 67") == "+79001234567"
+    assert normalizovat_telefon("9001234567") == "+79001234567"
+    assert normalizovat_telefon(None) is None
+    # Не похоже на телефон — отдаём как есть, чтобы менеджер увидел, что написал клиент.
+    assert normalizovat_telefon("напишите в вотсап") == "напишите в вотсап"

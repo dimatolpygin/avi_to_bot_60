@@ -118,13 +118,15 @@ class Stend:
         self.voprosy: list[str] = []
         self.istorii: list[list[dict]] = []
         self.sobytiya: list[tuple[str, str]] = []   # («реплика»|«печатает», текст)
+        self.klyuchi: list[str] = []                # ключ диалога, с которым позвали
         self.pamyat = PamyatVPamyati()
         self.dispetcher = Dispetcher(self._otvetit, tempo=tempo, pamyat=self.pamyat)
         self.pervaya_replika = asyncio.Event()
 
-    async def _otvetit(self, vopros: str, istoriya: list[dict]) -> str:
+    async def _otvetit(self, vopros: str, istoriya: list[dict], klyuch: str) -> str:
         self.voprosy.append(vopros)
         self.istorii.append(istoriya)
+        self.klyuchi.append(klyuch)
         if self.zaderzhka:
             await asyncio.sleep(self.zaderzhka)
         if self.padat:

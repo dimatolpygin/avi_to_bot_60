@@ -46,7 +46,8 @@ def _klyuch(cfg: OpenRouterConfig) -> str:
 
 
 async def chat(cfg: OpenRouterConfig, messages: list[dict],
-               tools: list[dict] | None = None, tool_choice: str = "auto") -> dict:
+               tools: list[dict] | None = None,
+               tool_choice: str | dict = "auto") -> dict:
     """Один вызов модели → сообщение ассистента `{content, tool_calls}`."""
     telo: dict = {"model": cfg.model, "messages": messages, "temperature": TEMPERATURA}
     if tools:

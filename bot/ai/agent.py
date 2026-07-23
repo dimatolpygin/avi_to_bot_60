@@ -24,7 +24,7 @@ from dataclasses import dataclass, field
 from decimal import ROUND_HALF_UP, Decimal
 
 from ..config import OpenRouterConfig
-from ..logger import log_tool_call, logger
+from ..logger import log_lead, log_oshibka, log_tool_call, logger
 from ..search.katalog import Katalog
 from ..search.search import Nahodka, Poisk, cena_za_metr_kvadratnyy
 from ..search.slovari import slovari
@@ -175,9 +175,16 @@ def pravila_stilya(imya: str, kompaniya: str, *, zhenskiy_rod: bool = True,
 
 ПРО КОНТАКТ:
 - Телефон {pervoy} НЕ проси. Никогда. Сначала помоги с выбором и ответь на вопрос.
-- Клиент сам оставил номер или попросил перезвонить — поблагодари и скажи, что менеджер
-  свяжется. Клиент просит расчёт или подбор, которого ты сделать не можешь, — можешь
-  предложить связать с менеджером, но не требуй контакт как условие ответа."""
+- Клиент САМ написал номер или сам попросил перезвонить — вызови инструмент save_lead
+  и передай менеджеру номер, имя (если называл) и выжимку разговора. После этого
+  поблагодари и скажи, что передала менеджеру и он свяжется.
+- Выжимка пишется для человека, который переписку не читал: что клиент спрашивал, что ему
+  нужно, какие называл размеры, сорта, бюджет и сроки, о чём договорились и что осталось
+  выяснить. Три-четыре фразы, только то, что реально прозвучало. Ничего не додумывай.
+- Инструмент нужен ровно один раз на один контакт: клиент повторил номер — не передавай
+  заново, менеджер уже знает.
+- Клиент просит расчёт или подбор, которого ты сделать не можешь, — можешь предложить
+  связать с менеджером, но не требуй контакт как условие ответа."""
 
 
 def _assortiment(katalog: Katalog) -> str:
@@ -246,7 +253,53 @@ def _bot_uzhe_govoril(istoriya: list[dict]) -> bool:
     return any(z.get("role") == "assistant" for z in istoriya)
 
 
-# ── Инструмент ───────────────────────────────────────────────────────────────
+# ── Инструменты ──────────────────────────────────────────────────────────────
+
+#: Передача лида менеджеру. Даётся ВСЕМ трём аккаунтам, включая услуги: прайса
+#: у них нет, а контакт клиента есть всегда, и он там даже ценнее — вся работа
+#: аккаунтов отделки начинается с замера, то есть со звонка менеджера.
+INSTRUMENT_LEAD = {
+    "type": "function",
+    "function": {
+        "name": "save_lead",
+        "description": (
+            "Передать контакт клиента менеджеру вместе с выжимкой разговора. "
+            "Вызывай ТОЛЬКО когда клиент САМ написал телефон или сам попросил "
+            "перезвонить. Первым телефон не проси и этот инструмент ради него "
+            "не вызывай. Вызвал — скажи клиенту обычной репликой, что передала "
+            "менеджеру и он свяжется."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "telefon": {
+                    "type": "string",
+                    "description": "Номер ровно так, как написал клиент. Не выдумывай "
+                                   "и не дополняй: нет номера — не вызывай инструмент.",
+                },
+                "imya": {
+                    "type": "string",
+                    "description": "Имя клиента, если он назвался. Иначе не передавай.",
+                },
+                "vyzhimka": {
+                    "type": "string",
+                    "description": (
+                        "О чём был разговор — три-четыре фразы для менеджера, который "
+                        "переписку не читал. Что клиент спрашивал, что ему нужно, какие "
+                        "назвал размеры, сорта, бюджет и сроки, о чём договорились и что "
+                        "осталось выяснить. Только то, что реально прозвучало в диалоге: "
+                        "додумывать за клиента нельзя."
+                    ),
+                },
+            },
+            "required": ["telefon", "vyzhimka"],
+        },
+    },
+}
+
+#: Значение `tool_choice` для предохранителей: заставить модель вызвать именно
+#: поиск. Просто "required" тут не годится — она вправе выбрать save_lead.
+FORSIROVAT_POISK = {"type": "function", "function": {"name": "search_products"}}
 
 INSTRUMENTY = [{
     "type": "function",
@@ -389,11 +442,13 @@ class OtvetAgenta:
     zaprosy_poiska: list[str] = field(default_factory=list)
     naydeno: int = 0
     forsirovan_poisk: bool = False
+    lead_peredan: bool = False
 
 
 async def otvetit(cfg: OpenRouterConfig, poisk: Poisk | None, istoriya: list[dict],
                   tekst_klienta: str, data_praysa: str = "",
-                  sistemny: str | None = None) -> OtvetAgenta:
+                  sistemny: str | None = None,
+                  peredat_lead=None) -> OtvetAgenta:
     """Ответ на реплику клиента.
 
     `istoriya` — предыдущие реплики диалога (`role`/`content`); хранит её
@@ -405,13 +460,18 @@ async def otvetit(cfg: OpenRouterConfig, poisk: Poisk | None, istoriya: list[dic
     тогда не даём вовсе: с пустым каталогом он на любой вопрос отвечал бы «не найдено»,
     и бот отделки говорил бы клиенту, что такой позиции нет. Предохранители тоже
     выключаются — они про то, что модель отказала, не заглянув в прайс, а прайса нет.
+
+    `peredat_lead(телефон, имя, выжимка)` — куда отдать контакт, когда клиент
+    сам его оставил. Инструмент `save_lead` есть у ВСЕХ аккаунтов, включая
+    услуги: прайса у них нет, а контакт есть всегда.
     """
     if sistemny is None:
         if poisk is None:
             raise ValueError("Без поиска системный промпт обязателен: "
                              "у аккаунта услуг его собирать не из чего")
         sistemny = sobrat_prompt(poisk.katalog)
-    instrumenty = INSTRUMENTY if poisk is not None else None
+    instrumenty = ([*INSTRUMENTY, INSTRUMENT_LEAD] if poisk is not None
+                   else [INSTRUMENT_LEAD])
     soobshcheniya: list[dict] = [
         {"role": "system", "content": sistemny},
         *istoriya,
@@ -419,12 +479,16 @@ async def otvetit(cfg: OpenRouterConfig, poisk: Poisk | None, istoriya: list[dic
     ]
     zaprosy_poiska: list[str] = []
     naydeno = 0
+    lead_peredan = False
     forsirovano = False      # предохранитель срабатывает не больше раза за ход
     forsim_seychas = False
 
     for _ in range(ITERACIY):
+        # Форсируем ИМЕННО поиск, а не «любой инструмент»: с появлением save_lead
+        # значение "required" разрешило бы модели вместо прайса дёрнуть передачу
+        # лида — то есть предохранитель начал бы просить телефон вместо поиска.
         rezultat = await chat(cfg, soobshcheniya, instrumenty,
-                              tool_choice="required" if forsim_seychas else "auto")
+                              tool_choice=FORSIROVAT_POISK if forsim_seychas else "auto")
         forsim_seychas = False
 
         if rezultat.get("tool_calls"):
@@ -432,6 +496,30 @@ async def otvetit(cfg: OpenRouterConfig, poisk: Poisk | None, istoriya: list[dic
                                   "content": rezultat.get("content") or "",
                                   "tool_calls": rezultat["tool_calls"]})
             for vyzov in rezultat["tool_calls"]:
+                imya_instrumenta = vyzov.get("function", {}).get("name", "")
+
+                if imya_instrumenta == "save_lead":
+                    otvet_instrumenta = await _peredat_lead(vyzov, peredat_lead)
+                    lead_peredan = lead_peredan or otvet_instrumenta.get("передан", False)
+                    soobshcheniya.append({
+                        "role": "tool", "tool_call_id": vyzov["id"],
+                        "content": json.dumps(otvet_instrumenta, ensure_ascii=False),
+                    })
+                    continue
+
+                # Поиска нет (аккаунт услуг), а модель его всё же позвала —
+                # отвечаем инструментом, а не падаем: инструмент ей не давали,
+                # значит это выдумка провайдера, и диалог из-за неё рваться не должен.
+                if poisk is None:
+                    log_oshibka(f"Модель позвала «{imya_instrumenta}», которого у неё нет")
+                    soobshcheniya.append({
+                        "role": "tool", "tool_call_id": vyzov["id"],
+                        "content": json.dumps(
+                            {"ошибка": "Такого инструмента нет. Ответь текстом."},
+                            ensure_ascii=False),
+                    })
+                    continue
+
                 zapros, assort = _razobrat_vyzov(vyzov)
                 zaprosy_poiska.append(zapros)
                 top = TOP_ASSORTIMENT if assort else TOP_TOCHECHNY
@@ -498,7 +586,7 @@ async def otvetit(cfg: OpenRouterConfig, poisk: Poisk | None, istoriya: list[dic
                       {"role": "user", "content": tekst_klienta},
                       {"role": "assistant", "content": otvet}],
             zaprosy_poiska=zaprosy_poiska, naydeno=naydeno,
-            forsirovan_poisk=forsirovano,
+            forsirovan_poisk=forsirovano, lead_peredan=lead_peredan,
         )
 
     logger.warning("Агент исчерпал лимит итераций (%d)", ITERACIY)
@@ -509,7 +597,43 @@ async def otvetit(cfg: OpenRouterConfig, poisk: Poisk | None, istoriya: list[dic
                   {"role": "user", "content": tekst_klienta},
                   {"role": "assistant", "content": otvet}],
         zaprosy_poiska=zaprosy_poiska, naydeno=naydeno, forsirovan_poisk=forsirovano,
+        lead_peredan=lead_peredan,
     )
+
+
+async def _peredat_lead(vyzov: dict, peredat_lead) -> dict:
+    """Вызов `save_lead` → передача контакта наружу и ответ модели.
+
+    Наружу лид уходит колбэком, а не прямой записью в БД: `agent.py` про базу
+    не знает и знать не должен — он собирает промпт и ведёт agent-loop. Колбэк
+    подставляет `bot/core.py`, где известны аккаунт и чат.
+
+    Колбэка нет (тесты, `bot.ai.probe`) — лид не теряем молча, а пишем в лог:
+    это единственное событие диалога, которое стоит денег заказчику.
+    """
+    try:
+        args = json.loads(vyzov["function"]["arguments"])
+    except (json.JSONDecodeError, KeyError, TypeError):
+        log_oshibka("Битые аргументы save_lead — лид не передан")
+        return {"передан": False, "ошибка": "Аргументы не разобраны, позови ещё раз."}
+
+    telefon = (args.get("telefon") or "").strip()
+    imya = (args.get("imya") or "").strip() or None
+    vyzhimka = (args.get("vyzhimka") or "").strip()
+    if not telefon:
+        return {"передан": False,
+                "ошибка": "Телефона нет. Инструмент зовут, только когда клиент дал номер."}
+
+    log_tool_call("save_lead", {"телефон": telefon, "имя": imya}, "передаю менеджеру")
+    if peredat_lead is None:
+        log_lead(None, telefon, imya, vyzhimka)
+        return {"передан": True, "пометка": "Скажи клиенту, что передала менеджеру."}
+    try:
+        await peredat_lead(telefon, imya, vyzhimka)
+    except Exception as e:  # noqa: BLE001 — лид важнее, чем красивый traceback наружу
+        log_oshibka(f"Лид не передан ({telefon}): {e}")
+        return {"передан": False, "пометка": "Всё равно скажи клиенту, что менеджер свяжется."}
+    return {"передан": True, "пометка": "Скажи клиенту, что передала менеджеру."}
 
 
 def _razobrat_vyzov(vyzov: dict) -> tuple[str, bool]:

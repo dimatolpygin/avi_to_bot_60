@@ -186,7 +186,7 @@ async def _zhivoy(tempo: Tempo) -> int:
     cfg = load_config().openrouter
     poisk = Poisk(iz_fayla_praysa())
 
-    async def otvetchik(vopros: str, istoriya: list[dict]) -> str:
+    async def otvetchik(vopros: str, istoriya: list[dict], klyuch: str) -> str:
         return (await otvetit(cfg, poisk, istoriya, vopros)).otvet
 
     kanal = KonsolKanal()

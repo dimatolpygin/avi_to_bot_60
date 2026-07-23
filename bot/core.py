@@ -23,6 +23,7 @@ from .ai.agent import otvetit, sobrat_prompt
 from .chelovek.dispetcher import Dispetcher, Kanal, Pamyat
 from .chelovek.razbivka import Tempo
 from .config import Config
+from .lead import DannyeLida, sohranit_lead
 from .logger import logger
 from .pamyat import PamyatRedis
 from .profili import Profil, profil
@@ -37,6 +38,10 @@ class Yadro:
         self.cfg = cfg
         self.pamyat = pamyat
         self.tempo = tempo or Tempo()
+        # Транспорт нужен только затем, чтобы лид знал, из какого канала пришёл
+        # клиент: на этапе 14 здесь станет «avito», и менеджер в amo увидит разницу.
+        self.kanal_transporta = "telegram"
+        self._fabrika_sessiy = None
         self._dispetchery: dict[str, Dispetcher] = {}
         self._poiski: dict[str, Poisk] = {}
         self._prompty: dict[str, str] = {}
@@ -52,6 +57,7 @@ class Yadro:
         нужен, чтобы бот поднимался и без Postgres: без каталога он не сможет
         назвать ни одной цены, а это худший из отказов.
         """
+        self._fabrika_sessiy = fabrika_sessiy
         for kod in kody:
             prof = profil(kod)
             if not prof.tovarnyy:
@@ -88,16 +94,31 @@ class Yadro:
 
     def _otvetchik(self, prof: Profil):
         """Замыкание «вопрос + история → текст ответа» под конкретный аккаунт."""
-        async def otvechat(vopros: str, istoriya: list[dict]) -> str:
+        async def otvechat(vopros: str, istoriya: list[dict], klyuch: str) -> str:
             rezultat = await otvetit(
                 self.cfg.openrouter,
                 self._poiski.get(prof.kod),           # None у аккаунтов услуг
                 istoriya, vopros,
                 data_praysa=self._data_praysa.get(prof.kod, ""),
                 sistemny=self._prompty.get(prof.kod) or None,
+                peredat_lead=self._peredat_lead(prof.kod, klyuch),
             )
             return rezultat.otvet
         return otvechat
+
+    def _peredat_lead(self, kod: str, klyuch: str):
+        """Куда уходит контакт, который клиент оставил сам.
+
+        Чат достаём из ключа диалога (`аккаунт:чат`): по нему менеджер найдёт
+        переписку, а этап 12 — сделку в amoCRM.
+        """
+        _, _, chat = klyuch.partition(":")
+
+        async def peredat(telefon: str, imya: str | None, vyzhimka: str) -> None:
+            await sohranit_lead(self._fabrika_sessiy, DannyeLida(
+                kod_akkaunta=kod, chat=chat, kanal=self.kanal_transporta,
+                telefon=telefon, imya=imya, vyzhimka=vyzhimka))
+        return peredat
 
     def obrabotat(self, kod: str, chat: str | int, tekst: str, kanal: Kanal) -> asyncio.Task:
         """Входящее сообщение клиента. Возвращает задачу ответа (нужна тестам)."""

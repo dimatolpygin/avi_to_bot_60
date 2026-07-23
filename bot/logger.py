@@ -159,6 +159,17 @@ def log_preryvanie(otpravleno: int, vsego: int) -> None:
     logger.info(f"✂️ прервано новым сообщением: отправлено {otpravleno} из {vsego} реплик")
 
 
+def log_lead(lead_id: int | None, telefon: str | None, imya: str | None,
+             vyzhimka: str) -> None:
+    """Клиент оставил контакт — самое ценное событие во всём логе.
+
+    Пишем его целиком и одной строкой: пока amoCRM не подключена (этап 12),
+    лог — второй экземпляр лида, по которому менеджера можно позвать руками.
+    """
+    kto = f"{imya}, {telefon}" if imya else f"{telefon}"
+    logger.info(f"🎯 ЛИД #{lead_id} · {kto} | {vyzhimka}")
+
+
 def log_oshibka(chto: str, *, zapros: str = "") -> None:
     """Ошибка с полным контекстом: traceback + аккаунт/rid (через фильтр) +
     исходный текст запроса. Звать из блока except."""

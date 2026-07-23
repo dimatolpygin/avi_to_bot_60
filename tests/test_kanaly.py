@@ -116,7 +116,10 @@ async def test_agent_bez_poiska_ne_daet_instrument(monkeypatch):
     r = await agent.otvetit(CFG, None, [], "сколько стоит отделка парной",
                             sistemny=profil("sbsauna").prompt)
     assert "500" in r.otvet
-    assert fake.vyzovy[0]["tools"] is None
+    # Поиска нет, а передача лида есть: прайса у аккаунта не существует,
+    # контакт клиента — существует, и для отделки он даже важнее.
+    imena = [i["function"]["name"] for i in fake.vyzovy[0]["tools"]]
+    assert imena == ["save_lead"]
     assert r.zaprosy_poiska == []
 
 
@@ -333,8 +336,9 @@ async def test_raznye_akkaunty_otvechayut_svoim_promptom(monkeypatch):
     promt_uslugi = fake.vyzovy[1]["messages"][0]["content"]
     assert "Александра" in promt_tovarnyy and "Роман" not in promt_tovarnyy
     assert "Роман" in promt_uslugi and "500 тысяч" in promt_uslugi
-    assert fake.vyzovy[0]["tools"] is not None     # у товарного инструмент есть
-    assert fake.vyzovy[1]["tools"] is None         # у услуг нет
+    imena = lambda i: [t["function"]["name"] for t in fake.vyzovy[i]["tools"]]
+    assert imena(0) == ["search_products", "save_lead"]   # у товарного оба
+    assert imena(1) == ["save_lead"]                      # у услуг только лид
 
 
 async def test_odin_chat_v_raznyh_botah_ne_smeshivaet_istorii(monkeypatch):
