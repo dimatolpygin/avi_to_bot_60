@@ -57,6 +57,9 @@ class Semeystvo:
     kanon: str
     rodovoe: str
     sinonimy: tuple[str, ...]
+    # Семейство, которое клиент имеет в виду, назвав только породу и длину
+    # («липа 3 метра»). Родовой канал поиска (этап 6) поднимает его в топ.
+    rodovoe_po_umolchaniyu: bool = False
     # Стемы каждого варианта названия (ключ, канон, каждый синоним) — точный канал.
     varianty: tuple[frozenset[str], ...] = field(repr=False, default=())
     # Однословные варианты как слова — фаззи-канал (опечатки).
@@ -157,6 +160,7 @@ def _sobrat_semeystva(syroy: dict) -> dict[str, Semeystvo]:
         semeystva[klyuch] = Semeystvo(
             klyuch=klyuch, kanon=kanon, rodovoe=e.get("родовое", ""),
             sinonimy=sinonimy, varianty=varianty, odnoslovnye=odnoslovnye,
+            rodovoe_po_umolchaniyu=bool(e.get("родовое_по_умолчанию", False)),
         )
     return semeystva
 
