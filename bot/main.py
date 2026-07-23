@@ -1,32 +1,33 @@
 # -*- coding: utf-8 -*-
 """Точка входа процесса: `python -m bot.main`.
 
-Этап 2 — каркас: читаем конфиг, поднимаем соединения с Postgres и Redis,
-держим процесс живым и корректно гасим соединения по сигналу. Каналы
-(три Telegram-бота на общем ядре) подключаются на этапе 10 — для них здесь
-уже стоит супервизор: падение одного канала логируется и не роняет соседей.
+Поднимает соединения, собирает ядро диалога и запускает по одному Telegram-боту
+на каждый аккаунт Авито, у которого в `.env` есть токен (этап 10). Каждый канал
+живёт под супервизором: падение одного логируется и перезапускается через паузу,
+соседи продолжают отвечать — три аккаунта не должны зависеть друг от друга.
+
+Пустой токен — это не ошибка, а способ выключить конкретного бота: аккаунт
+просто не поднимается, остальные работают.
 """
 import asyncio
 import signal
 
 from . import SBORKA
 from .config import Config, load_config
+from .core import Yadro, sozdat_yadro
 from .logger import logger, log_oshibka
 from . import cache, db
 
 _RESTART_PAUZA = 5.0   # сек между падением канала и перезапуском
 _PULS_S = 300.0        # раз в 5 минут отмечаемся в логе, что процесс жив
 
-# (код аккаунта, функция запуска канала) — заполняется на этапе 10.
-KANALY: list[tuple[str, object]] = []
 
-
-async def _supervise(name: str, fn, cfg: Config) -> None:
+async def _supervise(name: str, zapustit) -> None:
     """Канал под надзором. Штатное завершение → выход, падение → лог и
     перезапуск через паузу, отмена (shutdown) пробрасывается наверх."""
     while True:
         try:
-            await fn(cfg)
+            await zapustit()
             logger.info("Канал %s завершил работу", name)
             return
         except asyncio.CancelledError:
@@ -35,6 +36,23 @@ async def _supervise(name: str, fn, cfg: Config) -> None:
             logger.error("Канал %s упал: %s; перезапуск через %dс",
                          name, e, int(_RESTART_PAUZA), exc_info=True)
             await asyncio.sleep(_RESTART_PAUZA)
+
+
+def zhivye_akkaunty(cfg: Config) -> tuple[list[str], list[str]]:
+    """(с токеном, без токена). Пустой токен — не ошибка, а выключатель бота:
+    аккаунт просто не поднимается, соседи работают."""
+    zhivye = [k for k, t in cfg.telegram_tokeny.items() if t.strip()]
+    vyklyuchennye = [k for k, t in cfg.telegram_tokeny.items() if not t.strip()]
+    return zhivye, vyklyuchennye
+
+
+def _kanal_telegram(kod: str, token: str, yadro: Yadro):
+    """Фабрика запуска канала — импорт внутри, чтобы aiogram не тянулся в CLI
+    (ETL, замеры, разбор запроса), которым транспорт не нужен."""
+    async def zapustit() -> None:
+        from .channels import telegram
+        await telegram.zapustit(kod, token, yadro)
+    return zapustit
 
 
 async def _puls(stop: asyncio.Event) -> None:
@@ -70,26 +88,32 @@ async def main() -> None:
 
     engine = None
     redis_client = None
+    yadro: Yadro | None = None
     tasks: list[asyncio.Task] = []
     stop = asyncio.Event()
     try:
         engine = await db.podklyuchit(cfg)
         redis_client = await cache.podklyuchit(cfg)
 
-        zhivye = [k for k, t in cfg.telegram_tokeny.items() if t]
+        zhivye, vyklyuchennye = zhivye_akkaunty(cfg)
         if zhivye:
             logger.info("📡 Аккаунты с токеном: %s", ", ".join(zhivye))
-        else:
-            logger.info("📡 Токенов Telegram в .env нет — каналы не поднимаются "
-                        "(ждём три токена от заказчика, этап 10)")
+        if vyklyuchennye:
+            logger.info("📡 Без токена (боты не поднимаются): %s", ", ".join(vyklyuchennye))
+        if not zhivye:
+            logger.info("📡 Токенов Telegram в .env нет — каналы не поднимаются")
+
+        yadro = sozdat_yadro(cfg, redis_client)
+        await yadro.podgotovit(zhivye, db.sozdat_fabriku_sessiy(engine))
 
         _ustanovit_signaly(stop)
-        tasks = [asyncio.create_task(_supervise(name, fn, cfg), name=name)
-                 for name, fn in KANALY]
-        tasks.append(asyncio.create_task(_puls(stop), name="пульс"))
+        tasks = [asyncio.create_task(
+            _supervise(kod, _kanal_telegram(kod, cfg.telegram_tokeny[kod], yadro)), name=kod)
+            for kod in zhivye]
+        if not tasks:
+            tasks.append(asyncio.create_task(_puls(stop), name="пульс"))
 
-        logger.info("✅ Каркас поднят. Проверка логов и сквозного id: "
-                    "python -m bot.proverka")
+        logger.info("✅ Поднято ботов: %d. Логи диалогов идут сюда же.", len(zhivye))
         await stop.wait()
     except SystemExit:
         raise
@@ -103,6 +127,10 @@ async def main() -> None:
             t.cancel()
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
+        if yadro is not None:
+            # Гасим недоговорённые диалоги: незаконченный ответ лучше оборвать,
+            # чем оставить висеть задачу при закрытых соединениях.
+            await yadro.ostanovit()
         await cache.zakryt(redis_client)
         await db.zakryt(engine)
         logger.info("🛑 Остановлен.")

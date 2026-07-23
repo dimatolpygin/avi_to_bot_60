@@ -18,7 +18,10 @@ stdlib logging + contextvars (лог на русском со сквозным r
 OpenRouter (`anthropic/claude-haiku-4.5`) · своя React-панель · Docker.
 
 ## Структура
-- `bot/` — приложение: `config.py`, `logger.py`, `db.py`, `cache.py`, `models.py`, `seed.py`, `main.py`, `proverka.py`.
+- `bot/` — приложение: `config.py`, `logger.py`, `db.py`, `cache.py`, `models.py`, `seed.py`,
+  `main.py` (супервизор ботов), `proverka.py`, `core.py` (ядро диалога без транспорта),
+  `profili.py` (персона и промпт на аккаунт), `pamyat.py` (история диалога в Redis).
+- `bot/channels/` — транспорты: `telegram.py` (три бота обкатки), на этапе 14 добавится Авито.
 - `bot/etl/` — импорт прайса: `chtenie.py` (прочитать и проверить файл), `razbor.py`
   (атрибуты из названия), `import_prays.py` (upsert по артикулу одной транзакцией).
 - `bot/search/` — поиск: `normalize.py` (нормализация и стемминг), `fuzzy.py` (опечатки),
@@ -40,6 +43,12 @@ OpenRouter (`anthropic/claude-haiku-4.5`) · своя React-панель · Dock
 ## Разработка
 Postgres и Redis — существующие контейнеры хоста (`postgres16` :5432, `redis` :6379):
 compose поднимает только приложение и ходит в них через шлюз хоста.
+
+Три Telegram-бота обкатки (по одному на аккаунт Авито) поднимаются самим процессом:
+токены лежат в `.env` (`TG_TOKEN_SAUNAMART`, `TG_TOKEN_SBSAUNA`, `TG_TOKEN_DESHMAN`),
+пустой токен просто выключает своего бота. **Правка `.env` требует пересоздания
+контейнера** (`docker compose up -d --force-recreate app`): переменные окружения
+фиксируются при его создании, и автоперезагрузка кода их не обновляет.
 
 ```bash
 cp .env.example .env               # заполнить PG*, REDIS_URL, ключи
