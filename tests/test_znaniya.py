@@ -35,6 +35,16 @@ def test_obshchie_bloki_est_u_oboih_akkauntov():
                 "chego_ne_znaesh", "kak_rabotat"} <= klyuchi, kod
 
 
+def test_vedenie_est_u_oboih_i_stoit_poslednim():
+    """Ведение к сделке — общий блок услуг; последний, чтобы пересев добавил его
+    в конец без коллизии sort с уже засеянными блоками."""
+    for kod in ("sbsauna", "sbsauna_deshman"):
+        bloki = bloki_akkaunta(kod)
+        assert bloki[-1].key == "vedenie", kod
+        p = prompt_iz_koda(kod, "SB SAUNA")
+        assert "двигает разговор вперёд" in p and "справочник" in p, kod
+
+
 def test_neizvestnyy_akkaunt_padaet_ponyatno():
     with pytest.raises(KeyError, match="нет базы знаний"):
         bloki_akkaunta("saunamart")
