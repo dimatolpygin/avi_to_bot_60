@@ -43,16 +43,26 @@ def test_vedenie_est_u_oboih():
         assert "двигает разговор вперёд" in p and "справочник" in p, kod
 
 
-def test_kontakty_poslednim_i_bez_levogo_sayta():
-    """Контакты — новый блок, добавлен ПОСЛЕДНИМ (чтобы пересев не поймал коллизию
-    sort с уже засеянными блоками). Сайт только правильный; левого «(sbsauna.ru)»
-    из шапки персоны больше нет — из-за него бот выдавал клиенту чужой адрес."""
+def test_kontakty_bez_levogo_sayta():
+    """Контакты у обоих; сайт только правильный, левого «(sbsauna.ru)» из шапки
+    персоны больше нет — из-за него бот выдавал клиенту чужой адрес."""
     for kod in ("sbsauna", "sbsauna_deshman"):
-        bloki = bloki_akkaunta(kod)
-        assert bloki[-1].key == "kontakty", kod
+        assert "kontakty" in {b.key for b in bloki_akkaunta(kod)}, kod
         p = prompt_iz_koda(kod, "SB SAUNA")
         assert "saunayug.ru" in p and "9:00" in p, kod
         assert "(sbsauna.ru)" not in p, kod
+
+
+def test_oplata_u_oboih_pechi_tolko_u_deshmana():
+    """Оплата (нал/безнал, физ+юр) — общий факт обеих услуг; печи с Harvia — только
+    у Дешмана. Новые блоки стоят В КОНЦЕ, чтобы пересев добавил их без коллизии sort."""
+    assert bloki_akkaunta("sbsauna")[-1].key == "oplata"
+    assert bloki_akkaunta("sbsauna_deshman")[-1].key == "pechi"
+    for kod in ("sbsauna", "sbsauna_deshman"):
+        p = prompt_iz_koda(kod, "SB SAUNA")
+        assert "наличный и безналичный" in p and "физлицами" in p, kod
+    assert "Harvia" in prompt_iz_koda("sbsauna_deshman", "SB SAUNA")
+    assert "Harvia" not in prompt_iz_koda("sbsauna", "SB SAUNA")
 
 
 def test_neizvestnyy_akkaunt_padaet_ponyatno():

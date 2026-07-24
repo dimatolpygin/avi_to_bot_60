@@ -124,6 +124,25 @@ def test_payload_nazyvaet_tsenu_i_nalichie(poisk):
     assert p["артикул"] == "176965"
 
 
+def test_payload_pechi_neset_rabochiy_obem():
+    """Баг заказчика 24.07: без рабочего объёма печи модель на «парная 5 на 3»
+    объявляла «9 кВт подойдёт, все три подходят». Диапазон объёма обязан приходить
+    в выдаче, иначе фитмент модель считает из головы. Тестовый каталог фикстуры печей
+    не содержит, поэтому находку собираем вручную."""
+    from decimal import Decimal
+    from types import SimpleNamespace
+    p = SimpleNamespace(
+        name="Печь электрическая ЭКМ Терра 9 кВт", article="126672",
+        price_apiece=Decimal("26100"), availability="in",
+        attrs={"obem_min_m3": 9, "obem_max_m3": 14},
+        length_m=None, price_per_m=None, is_package=False, working_width_mm=None)
+    n = SimpleNamespace(pozitsiya=p, dlina_sovpala=True,
+                        gruppa=SimpleNamespace(dliny=[], pozitsii=[p]))
+    d = agent._pozitsiya_v_payload(n)
+    assert d["объём_парной"]["значение"] == "от 9 до 14 м³"
+    assert "НЕ подойдёт" in d["объём_парной"]["как_подбирать"]
+
+
 def test_pustoe_nalichie_eto_utochnyu_a_ne_net(poisk):
     """Главный баг старого бота: пустая ячейка прайса читалась как «нет»."""
     nahodki, kanal = poisk.iskat("фольга")
