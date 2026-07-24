@@ -29,6 +29,7 @@ from .pamyat import PamyatRedis
 from .profili import Profil, profil
 from .search.katalog import Katalog, iz_fayla_praysa, zagruzit_iz_bd
 from .search.search import Poisk
+from .znaniya import prompt_iz_bd
 
 
 class Yadro:
@@ -61,7 +62,7 @@ class Yadro:
         for kod in kody:
             prof = profil(kod)
             if not prof.tovarnyy:
-                self._prompty[kod] = prof.prompt or ""
+                self._prompty[kod] = await self._prompt_uslug(prof, fabrika_sessiy)
                 logger.info("🧩 Аккаунт «%s»: услуги, прайса нет, поиск не подключаем", kod)
                 continue
             katalog = await self._katalog(kod, fabrika_sessiy)
@@ -82,6 +83,27 @@ class Yadro:
                 logger.warning("🧩 Каталог «%s» из БД не поднялся (%s) — беру файл прайса",
                                kod, e)
         return iz_fayla_praysa()
+
+    async def _prompt_uslug(self, prof: Profil, fabrika_sessiy) -> str:
+        """Промпт аккаунта услуг: из базы знаний в БД, а нет её — код-фолбэк.
+
+        Та же страховка, что у каталога товарного аккаунта: правка блока
+        в `knowledge_blocks` меняет ответ (после рестарта, как обновление
+        каталога), а пустая или недоступная БД не оставляет бота без промпта.
+        """
+        if fabrika_sessiy is not None:
+            try:
+                async with fabrika_sessiy() as sessiya:
+                    iz_bd = await prompt_iz_bd(sessiya, prof.kod, prof.kompaniya)
+                if iz_bd:
+                    logger.info("🧩 Аккаунт «%s»: промпт услуг собран из базы знаний БД", prof.kod)
+                    return iz_bd
+                logger.warning("🧩 Аккаунт «%s»: база знаний в БД пуста — беру код-фолбэк "
+                               "(запусти `python -m bot.seed_znaniya`)", prof.kod)
+            except Exception as e:  # noqa: BLE001
+                logger.warning("🧩 База знаний «%s» из БД не поднялась (%s) — беру код-фолбэк",
+                               prof.kod, e)
+        return prof.prompt or ""
 
     # ── Работа ───────────────────────────────────────────────────────────────
 
