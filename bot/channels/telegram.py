@@ -64,10 +64,12 @@ def sobrat_bota(kod: str, token: str, yadro: Yadro) -> tuple[Bot, AiogramDispatc
             await m.answer(tekst)
             log_ishodyashchee(_imya_klienta(m), tekst, meta="[приветствие]")
 
-    @dp.message(Command("reset"))
+    # Сброс — в трёх вариантах команды, чтобы при тестировании сбросить диалог
+    # можно было любым привычным словом: /reset, /сброс, /заново (регистр не важен).
+    @dp.message(Command("reset", "сброс", "заново", ignore_case=True))
     async def na_reset(m: Message) -> None:
         with nachat_zapros(kod):
-            logger.info("👤 @%s (id:%s) → /reset", _imya_klienta(m), m.chat.id)
+            logger.info("👤 @%s (id:%s) → %s (сброс)", _imya_klienta(m), m.chat.id, m.text)
             await yadro.sbros(kod, m.chat.id)
             tekst = "Начнём заново. Чем помочь?"
             await m.answer(tekst)
