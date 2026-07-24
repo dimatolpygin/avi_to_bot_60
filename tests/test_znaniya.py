@@ -35,14 +35,24 @@ def test_obshchie_bloki_est_u_oboih_akkauntov():
                 "chego_ne_znaesh", "kak_rabotat"} <= klyuchi, kod
 
 
-def test_vedenie_est_u_oboih_i_stoit_poslednim():
-    """Ведение к сделке — общий блок услуг; последний, чтобы пересев добавил его
-    в конец без коллизии sort с уже засеянными блоками."""
+def test_vedenie_est_u_oboih():
+    """Ведение к сделке — общий блок услуг обоих аккаунтов."""
     for kod in ("sbsauna", "sbsauna_deshman"):
-        bloki = bloki_akkaunta(kod)
-        assert bloki[-1].key == "vedenie", kod
+        assert "vedenie" in {b.key for b in bloki_akkaunta(kod)}, kod
         p = prompt_iz_koda(kod, "SB SAUNA")
         assert "двигает разговор вперёд" in p and "справочник" in p, kod
+
+
+def test_kontakty_poslednim_i_bez_levogo_sayta():
+    """Контакты — новый блок, добавлен ПОСЛЕДНИМ (чтобы пересев не поймал коллизию
+    sort с уже засеянными блоками). Сайт только правильный; левого «(sbsauna.ru)»
+    из шапки персоны больше нет — из-за него бот выдавал клиенту чужой адрес."""
+    for kod in ("sbsauna", "sbsauna_deshman"):
+        bloki = bloki_akkaunta(kod)
+        assert bloki[-1].key == "kontakty", kod
+        p = prompt_iz_koda(kod, "SB SAUNA")
+        assert "saunayug.ru" in p and "9:00" in p, kod
+        assert "(sbsauna.ru)" not in p, kod
 
 
 def test_neizvestnyy_akkaunt_padaet_ponyatno():
