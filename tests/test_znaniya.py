@@ -89,6 +89,15 @@ def test_orientiry_raznye_u_dvuh_napravleniy():
     assert "МАТЕРИАЛЫ ОТДЕЛЬНО мы продать можем" in prompt_iz_koda("sbsauna_deshman", "SB SAUNA")
 
 
+def test_deshman_akcent_na_cene_i_skidka_pod_svoi_brigady():
+    """Замечание заказчика: у Дешмана не было акцента на «дешман» и оффера материала
+    со скидкой 20% для клиентов со своими монтажниками. Оффер — только у бюджетного."""
+    p = prompt_iz_koda("sbsauna_deshman", "SB SAUNA")
+    assert "низкие цены" in p
+    assert "20%" in p and "свои" in p.lower()
+    assert "20%" not in prompt_iz_koda("sbsauna", "SB SAUNA")
+
+
 def test_pravka_bloka_menyaet_sobrannyy_prompt():
     """Критерий этапа на уровне ассемблера: текст блока определяет ответ."""
     bloki = bloki_akkaunta("sbsauna")
