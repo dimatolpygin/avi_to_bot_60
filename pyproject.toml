@@ -26,6 +26,9 @@ dependencies = [
     "rapidfuzz>=3.9",
     # ETL прайса (этап 4)
     "openpyxl>=3.1",
+    # Живой каталог из Google-таблицы (этап 16): чтение прайса сервисным аккаунтом.
+    "gspread>=6.0",
+    "google-auth>=2.0",
 ]
 
 [project.optional-dependencies]
