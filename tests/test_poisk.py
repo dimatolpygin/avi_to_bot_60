@@ -304,3 +304,33 @@ def test_detektor_molchit_na_pokrytom_kataloge():
 
     katalog = iz_polej([_polya_pozicii(s) for s in STROKI])
     assert proverit_pokrytie(katalog, slovari()) == []
+
+
+# ── C4 (этап 17): детектор нераспознанного объёма печи ───────────────────────
+
+# Печь, у которой объём парной ЕСТЬ текстом, но без цифр — парсер промахнётся.
+_PECH_OBEM_PROMAH = _stroka(70, "170001", "Печь дровяная Тест-20 сетчатая", "9000",
+                            "Тип банная печь. Объём парного помещения большой, без цифр")
+
+
+@pytest.mark.parametrize("tekst, promah", [
+    ("Объём парного помещения большой", True),      # про парную писали, числа нет
+    ("Объем бани 9-14 м3", False),                  # диапазон распознан
+    ("Объём каменки 7 л", False),                   # каменка — литры камней, не парная
+    ("", False),                                    # объёма нет вовсе — норма
+    ("Дровяная печь стальная", False),              # про объём вообще не писали
+])
+def test_obem_est_no_ne_raspoznan(tekst, promah):
+    from bot.etl.razbor import obem_est_no_ne_raspoznan
+    assert obem_est_no_ne_raspoznan(tekst) is promah
+
+
+def test_detektor_lovit_pechnoy_obem_promah():
+    """C4. Печь с объёмом текстом, но нераспознанным (новая формулировка) —
+    детектор сигналит. Печи БЕЗ объёма при этом молчат (норма, их большинство)."""
+    from bot.search.pokrytie import proverit_pokrytie
+    from bot.search.slovari import slovari
+
+    katalog = iz_polej([_polya_pozicii(s) for s in (*STROKI, _PECH_OBEM_PROMAH)])
+    preduprezhdeniya = proverit_pokrytie(katalog, slovari())
+    assert any("объём" in p.lower() and "распознан" in p.lower() for p in preduprezhdeniya)

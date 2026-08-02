@@ -28,8 +28,15 @@ def _stroka(nomer: int, article: str, name: str, cena: str,
                         nalichie_syroe=nalichie, nomer_stroki=nomer)
 
 
+# Характеристики вагонки как в живой таблице: размерный зачин перепутан (спека
+# полка — толщина 25, ширина 90), дальше идёт качественное описание сортов.
+# По политике этапа 17 боту уходит только часть от «Сорт …».
+_HAR_VAGONKA = ("Профиль толщина 25 мм, ширина 90мм. Сорт экстра без сучков, "
+                "сорт А несколько сучков на метр погонный, сорт Б сучки ярко "
+                "выраженны( это бюджетный вариант)")
+
 STROKI = [
-    _stroka(1, "176965", "Вагонка Липа сорт А 15х95 (88) L-3.0 м", "513"),
+    _stroka(1, "176965", "Вагонка Липа сорт А 15х95 (88) L-3.0 м", "513", _HAR_VAGONKA),
     _stroka(2, "176964", "Вагонка Липа сорт А 15х95 (88) L-2.5 м", "428"),
     _stroka(3, "119214", "Вагонка Липа сорт В 15х95 (88) L-3.0 м", "371"),
     _stroka(4, "174262", "Камни Габбро-диабаз мелкий 20кг Карелия", "600"),
@@ -132,8 +139,8 @@ def test_payload_pechi_neset_rabochiy_obem():
     from decimal import Decimal
     from types import SimpleNamespace
     p = SimpleNamespace(
-        name="Печь электрическая ЭКМ Терра 9 кВт", article="126672",
-        price_apiece=Decimal("26100"), availability="in",
+        name="Печь электрическая ЭКМ Терра 9 кВт", article="126672", family="печь",
+        price_apiece=Decimal("26100"), availability="in", characteristics=None,
         attrs={"obem_min_m3": 9, "obem_max_m3": 14},
         length_m=None, price_per_m=None, is_package=False, working_width_mm=None)
     n = SimpleNamespace(pozitsiya=p, dlina_sovpala=True,
@@ -141,6 +148,69 @@ def test_payload_pechi_neset_rabochiy_obem():
     d = agent._pozitsiya_v_payload(n)
     assert d["объём_парной"]["значение"] == "от 9 до 14 м³"
     assert "НЕ подойдёт" in d["объём_парной"]["как_подбирать"]
+
+
+# ── Описание товара в выдаче (этап 17) ───────────────────────────────────────
+
+
+def test_opisanie_pogonazh_tolko_kachestvo_bez_razmerov():
+    """C1. У вагонки/полка размеры — из названия, а размерный зачин описания
+    в живой таблице перепутан (спека полка). Боту уходит только часть от «Сорт …»,
+    перепутанные толщина/ширина не долетают."""
+    from types import SimpleNamespace
+    p = SimpleNamespace(family="вагонка", characteristics=_HAR_VAGONKA)
+    opis = agent._opisanie_dlya_modeli(p)
+    assert opis.startswith("Сорт")
+    assert "толщина" not in opis and "25" not in opis and "90" not in opis
+    assert "бюджетный" in opis
+
+
+def test_opisanie_pogonazh_bez_sorta_nichego_ne_daet():
+    """Нет качественной части («Сорт …») — отдавать один размерный зачин нельзя:
+    он про другой товар. Кейс дуба: «вагонка из дуба 1 метровые доски» → ничего."""
+    from types import SimpleNamespace
+    p = SimpleNamespace(family="вагонка", characteristics="вагонка из дуба 1 метровые доски")
+    assert agent._opisanie_dlya_modeli(p) is None
+
+
+def test_opisanie_pechi_tselikom():
+    """C2. У печей/дверей описание достоверно и важно — отдаём целиком."""
+    from types import SimpleNamespace
+    p = SimpleNamespace(family="печь",
+                        characteristics="мощность 9 кВт объем бани 9 - 14 м3")
+    opis = agent._opisanie_dlya_modeli(p)
+    assert opis == "мощность 9 кВт объем бани 9 - 14 м3"
+
+
+def test_payload_vagonka_neset_opisanie_sortov(poisk):
+    """C1 через выдачу: у вагонки в payload есть описание сортов и нет размеров."""
+    nahodki, kanal = poisk.iskat("вагонка липа сорт а 3 метра")
+    p = agent.payload_poiska(nahodki, kanal, "")["найдено"][0]
+    assert "Сорт" in p["описание"] and "бюджетный" in p["описание"]
+    assert "толщина" not in p["описание"]
+
+
+def test_payload_pechi_opisanie_i_obem_iz_nepustogo_dublya():
+    """C2 + устойчивость к дублю: у печи в таблице дубль строк — одна с описанием
+    и объёмом, вторая пустая, и представитель группы может быть пустым. Всё это
+    ОДИН товар, поэтому описание и объём берём из непустой строки."""
+    from types import SimpleNamespace
+    pusto = SimpleNamespace(
+        name="Печь ЭКМ Терра 9 кВт", article="1", family="печь", characteristics="",
+        price_apiece=Decimal("26100"), availability="in", attrs={},
+        length_m=None, price_per_m=None, is_package=False, working_width_mm=None)
+    polno = SimpleNamespace(
+        name="Печь ЭКМ Терра 9 кВт", article="1", family="печь",
+        characteristics="мощность 9 кВт объем бани 9 - 14 м3",
+        price_apiece=Decimal("26100"), availability="in",
+        attrs={"obem_min_m3": 9, "obem_max_m3": 14},
+        length_m=None, price_per_m=None, is_package=False, working_width_mm=None)
+    # Представитель (найденная позиция) — ПУСТАЯ строка дубля.
+    n = SimpleNamespace(pozitsiya=pusto, dlina_sovpala=True,
+                        gruppa=SimpleNamespace(dliny=[], pozitsii=[pusto, polno]))
+    d = agent._pozitsiya_v_payload(n)
+    assert "объем бани" in d["описание"]
+    assert d["объём_парной"]["значение"] == "от 9 до 14 м³"
 
 
 def test_pustoe_nalichie_eto_utochnyu_a_ne_net(poisk):

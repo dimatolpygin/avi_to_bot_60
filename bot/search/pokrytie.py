@@ -16,6 +16,9 @@
 - **нераспознанная порода** — у вагонки/полка/наличника/бруса/рейки `species=None`.
   У этих семейств порода в названии есть всегда, поэтому None здесь значит не
   «породы нет», а «слова нет в словаре пород».
+- **объём парной печи не считался** (этап 17, C4) — в описании печи есть текст про
+  объём, но парсер его не распознал (новая формулировка). Молчим, когда объёма
+  нет вовсе — это норма, у большинства печей он просто не заполнен.
 
 Стратегия курса 31.07: **каталог авто, словари — полуавто с явным сигналом**.
 Полная автогенерация словарей невозможна — клиентские синонимы («абаш»→абаши,
@@ -24,6 +27,7 @@
 """
 from __future__ import annotations
 
+from ..etl.razbor import obem_est_no_ne_raspoznan
 from ..logger import logger
 from .katalog import Katalog
 from .slovari import Slovari
@@ -52,6 +56,7 @@ def proverit_pokrytie(katalog: Katalog, sl: Slovari) -> list[str]:
     izvestnye_semeystva = set(sl.semeystva)
     novye_semeystva: dict[str, str] = {}          # семейство → пример названия
     porody_bez_slovarya: dict[str, str] = {}      # токен-кандидат → пример названия
+    pechi_obem_promah: dict[str, str] = {}        # печь → пример названия
 
     for g in katalog.gruppy:
         fam = g.family
@@ -59,6 +64,10 @@ def proverit_pokrytie(katalog: Katalog, sl: Slovari) -> list[str]:
             novye_semeystva.setdefault(fam, g.obrazec.name)
         if fam in PORODNYE_SEMEYSTVA and g.species is None:
             porody_bez_slovarya.setdefault(_porod_token(g.obrazec.name), g.obrazec.name)
+        # C4 (этап 17): у печи объём написан текстом, но парсер его не считал.
+        # Молчим на печах, где объёма нет вовсе (норма) — ловим только промах формата.
+        if fam == "печь" and obem_est_no_ne_raspoznan(g.obrazec.characteristics):
+            pechi_obem_promah.setdefault(g.imya, g.obrazec.name)
 
     preduprezhdeniya: list[str] = []
     for fam, primer in sorted(novye_semeystva.items()):
@@ -71,6 +80,12 @@ def proverit_pokrytie(katalog: Katalog, sl: Slovari) -> list[str]:
              f"bot/etl/razbor.py (_PORODY) и data/sinonimy_atributov.json")
         preduprezhdeniya.append(s)
         logger.warning("📚 Пробел словаря: %s", s)
+    for _, primer in sorted(pechi_obem_promah.items()):
+        s = (f"объём парной не распознан: «{primer[:60]}» — в описании он есть, "
+             f"но формулировка новая; проверь запись или поправь разбор "
+             f"(bot/etl/razbor.py, _obem_parnoy)")
+        preduprezhdeniya.append(s)
+        logger.warning("📚 Пробел разбора: %s", s)
 
     if not preduprezhdeniya:
         logger.info("📚 Словари покрывают каталог: новых семейств и пород нет")

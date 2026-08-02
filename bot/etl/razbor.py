@@ -221,6 +221,28 @@ def _obem_parnoy(tekst: str) -> tuple[int | None, int | None]:
     return (min(miny) if miny else None), (max(maksy) if maksy else None)
 
 
+def obem_est_no_ne_raspoznan(tekst: str | None) -> bool:
+    """True, если в характеристиках есть упоминание объёма ПАРНОЙ (не каменки/
+    заклада), но диапазон из него не считался.
+
+    Нужен детектору пробелов (этап 17, C4): отличить «объёма нет в данных» —
+    норма, у 21 из 32 печей его просто не заполнили — от «объём есть текстом,
+    но парсер промахнулся на новой, восьмой формулировке». Первое молчит,
+    второе — сигнал заполнить/поправить.
+    """
+    if not tekst:
+        return False
+    omin, omax = _obem_parnoy(tekst)
+    if omin is not None or omax is not None:
+        return False                       # распознан — не пробел
+    for yakor in _RE_YAKOR_OBEM.finditer(tekst):
+        okno = tekst[yakor.end():yakor.end() + 80]
+        if re.search(r"каменк|заклад", okno[:30], re.I):
+            continue                       # это литры камней, а не парная
+        return True                        # про парную писали, а число не считалось
+    return False
+
+
 def razobrat(nazvanie: str, harakteristiki: str | None = None) -> Razobrannoe:
     """Разобрать название (и характеристики, если есть) на атрибуты."""
     n = normalizovat(nazvanie)

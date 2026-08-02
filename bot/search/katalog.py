@@ -57,6 +57,10 @@ class Pozitsiya:
     is_package: bool = False
     availability: str = "unknown"
     attrs: dict = field(default_factory=dict)
+    # Описание из таблицы. Боту отдаётся по политике этапа 17: у дерево-погонажа
+    # только качественная часть (сорта/сучки), размеры — из названия; у печей/
+    # дверей целиком. Разбор атрибутов (объём печи, ширина) идёт из него в ETL.
+    characteristics: str | None = None
     id: int | None = None
 
     @property
@@ -195,4 +199,5 @@ async def zagruzit_iz_bd(sessiya, kod_akkaunta: str) -> Katalog:
         unit=p.unit, price_apiece=p.price_apiece, price_per_m=p.price_per_m,
         price_per_m2=p.price_per_m2,
         is_package=p.is_package, availability=p.availability, attrs=dict(p.attrs or {}),
+        characteristics=p.characteristics,
     ) for p in stroki], f"БД, аккаунт {kod_akkaunta}")
