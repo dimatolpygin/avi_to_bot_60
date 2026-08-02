@@ -54,15 +54,30 @@ def test_kontakty_bez_levogo_sayta():
 
 
 def test_oplata_u_oboih_pechi_tolko_u_deshmana():
-    """Оплата (нал/безнал, физ+юр) — общий факт обеих услуг; печи с Harvia — только
-    у Дешмана. Новые блоки стоят В КОНЦЕ, чтобы пересев добавил их без коллизии sort."""
+    """Оплата (нал/безнал+НДС, физ+юр) — общий факт обеих услуг; печи с Harvia — только
+    у Дешмана. Новые блоки стоят В КОНЦЕ, чтобы пересев добавил их без коллизии sort:
+    последний у Дешмана — `hod_raboty`, у SB SAUNA — по-прежнему `oplata`."""
     assert bloki_akkaunta("sbsauna")[-1].key == "oplata"
-    assert bloki_akkaunta("sbsauna_deshman")[-1].key == "pechi"
+    assert bloki_akkaunta("sbsauna_deshman")[-1].key == "hod_raboty"
     for kod in ("sbsauna", "sbsauna_deshman"):
         p = prompt_iz_koda(kod, "SB SAUNA")
         assert "наличный и безналичный" in p and "физлицами" in p, kod
+        assert "НДС" in p, kod
     assert "Harvia" in prompt_iz_koda("sbsauna_deshman", "SB SAUNA")
     assert "Harvia" not in prompt_iz_koda("sbsauna", "SB SAUNA")
+
+
+def test_deshman_neset_mehaniku_deshevizny_i_hod_raboty():
+    """Первоисточник 28.07: на сомнение в цене бот объясняет МЕХАНИКУ (5 причин + свой
+    ОТК), а не повторяет «у нас дёшево». Плюс умеет назвать порядок работы под ключ.
+    Оба блока — только у бюджетного направления, у премиального SB SAUNA их нет."""
+    d = prompt_iz_koda("sbsauna_deshman", "SB SAUNA")
+    klyuchi_deshman = {b.key for b in bloki_akkaunta("sbsauna_deshman")}
+    klyuchi_sbsauna = {b.key for b in bloki_akkaunta("sbsauna")}
+    assert {"pochemu_deshevle", "hod_raboty"} <= klyuchi_deshman
+    assert not ({"pochemu_deshevle", "hod_raboty"} & klyuchi_sbsauna)
+    assert "без посредников" in d and "контроля качества" in d   # механика + ОТК
+    assert "замер" in d and "гарантией по договору" in d          # ход работы
 
 
 def test_neizvestnyy_akkaunt_padaet_ponyatno():
