@@ -141,10 +141,23 @@ def _poroda(qn: str, slova_zaprosa: tuple[str, ...], sl: Slovari) -> str | None:
     for fraza, poroda in sl.poroda_fraza:
         if fraza in qn:
             return poroda
+    baza = None
     for w in slova_zaprosa:
         if w in sl.poroda_slovo:
-            return sl.poroda_slovo[w]
-    return None
+            baza = sl.poroda_slovo[w]
+            break
+    if baza is None:
+        return None
+    # «термо» отдельным токеном в ЛЮБОМ порядке. Модель дробит «термоосина» на
+    # «осина термо» — фраза «термо осина» тут не срабатывает (обратный порядок),
+    # и порода схлопывается до обычной осины, а в каталоге species «термоосина»
+    # → позиция отсекается фильтром и бот отвечает «нет такого». Если есть токен
+    # «термо» и существует термо-вариант базовой породы — берём его.
+    if "термо" in slova_zaprosa:
+        termo = "термо" + baza
+        if termo in set(sl.poroda_slovo.values()):
+            return termo
+    return baza
 
 
 def _v_diapazone(v: Decimal) -> Decimal | None:

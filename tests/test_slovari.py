@@ -296,6 +296,16 @@ def test_termolipa_ne_stanovitsya_lipoy():
     assert razobrat_zapros("полок термолипа").poroda == "термолипа"
 
 
+def test_termo_poroda_v_lyubom_poryadke():
+    """Модель дробит «термоосина» на «осина термо» (обратный порядок). Токен
+    «термо» рядом с базовой породой обязан давать термо-вариант независимо от
+    порядка, иначе species «термоосина» в каталоге отсекается фильтром."""
+    assert razobrat_zapros("вагонка осина термо").poroda == "термоосина"
+    assert razobrat_zapros("полок липа термо").poroda == "термолипа"
+    # «термо» без породы, которой нет термо-варианта, не выдумывается.
+    assert razobrat_zapros("вагонка ольха термо").poroda == "ольха"
+
+
 def test_pravka_slovarya_podhvatyvaetsya_perezagruzkoy(tmp_path):
     """Критерий: правка словаря подхватывается перезапуском без правки кода."""
     for imya in ("slovar_svodnyy.json", "sinonimy_atributov.json",
