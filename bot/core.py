@@ -28,6 +28,7 @@ from .logger import logger
 from .pamyat import PamyatRedis
 from .profili import Profil, profil
 from .search.katalog import Katalog, iz_fayla_praysa, zagruzit_iz_bd
+from .search.pokrytie import proverit_pokrytie
 from .search.search import Poisk
 from .znaniya import prompt_iz_bd
 
@@ -66,13 +67,17 @@ class Yadro:
                 logger.info("🧩 Аккаунт «%s»: услуги, прайса нет, поиск не подключаем", kod)
                 continue
             katalog = await self._katalog(kod, fabrika_sessiy)
-            self._poiski[kod] = Poisk(katalog)
+            poisk = Poisk(katalog)
+            self._poiski[kod] = poisk
             # Промпт собирается из каталога один раз: он не меняется от реплики
             # к реплике, а список ассортимента в нём — из живых данных.
             self._prompty[kod] = sobrat_prompt(katalog)
             self._data_praysa[kod] = _data_praysa()
             logger.info("🧩 Аккаунт «%s»: каталог %d товаров, поиск подключён",
                         kod, len(katalog.gruppy))
+            # Сигнал о словах каталога, не покрытых словарями (этап 16, B3):
+            # новое семейство/порода из таблицы иначе молча ломают поиск.
+            proverit_pokrytie(katalog, poisk.sl)
 
     async def _katalog(self, kod: str, fabrika_sessiy) -> Katalog:
         if fabrika_sessiy is not None:
@@ -83,6 +88,50 @@ class Yadro:
                 logger.warning("🧩 Каталог «%s» из БД не поднялся (%s) — беру файл прайса",
                                kod, e)
         return iz_fayla_praysa()
+
+    async def perezagruzit_katalog(self, kod: str) -> bool:
+        """Пересобрать поиск и промпт товарного аккаунта из БД БЕЗ рестарта.
+
+        Зовётся после успешного фонового синка (этап 16, A5): `Yadro` строит
+        `_poiski[kod]` и промпт один раз при старте и держит до рестарта, поэтому
+        свежий каталог в БД для живого бота бесполезен без этой перезагрузки.
+
+        Подмена **атомарна**: сначала целиком собираем новый `Poisk` и промпт,
+        и только потом одной привязкой меняем ссылку в словаре — живой диалог
+        видит либо старую версию целиком, либо новую, но не полусобранную.
+
+        Под защитой: пустой или не поднявшийся каталог **не затирает** рабочий.
+        Синк в БД мог пройти, а чтение назад — упасть (обрыв соединения) или
+        вернуть пусто (гонка, кривой прайс). Оставить бота без каталога хуже,
+        чем ответить по чуть устаревшему. Возвращает True, если подмена была.
+        """
+        prof = profil(kod)
+        if not prof.tovarnyy:
+            return False   # у аккаунтов услуг каталога нет — перезагружать нечего
+        if self._fabrika_sessiy is None:
+            logger.warning("🔄 Перезагрузка каталога «%s»: нет фабрики сессий — пропускаю", kod)
+            return False
+        try:
+            async with self._fabrika_sessiy() as sessiya:
+                katalog = await zagruzit_iz_bd(sessiya, kod)
+        except Exception as e:  # noqa: BLE001 — обрыв БД, откат — не роняем бота
+            logger.error("🔄 Перезагрузка каталога «%s» из БД не удалась (%s) — "
+                         "оставляю прежний", kod, e)
+            return False
+        if not katalog.gruppy:
+            logger.warning("🔄 Перезагрузка каталога «%s»: БД вернула пустой каталог — "
+                           "оставляю прежний", kod)
+            return False
+
+        novyy_poisk = Poisk(katalog)
+        novyy_prompt = sobrat_prompt(katalog)
+        self._poiski[kod] = novyy_poisk
+        self._prompty[kod] = novyy_prompt
+        logger.info("🔄 Каталог «%s» перезагружен без рестарта: %d товаров, "
+                    "поиск и промпт пересобраны", kod, len(katalog.gruppy))
+        # Свежая таблица могла принести новое семейство/породу — сигналим (B3).
+        proverit_pokrytie(katalog, novyy_poisk.sl)
+        return True
 
     async def _prompt_uslug(self, prof: Profil, fabrika_sessiy) -> str:
         """Промпт аккаунта услуг: из базы знаний в БД, а нет её — код-фолбэк.

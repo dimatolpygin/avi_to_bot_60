@@ -10,13 +10,16 @@ import json
 
 import pytest
 
+from bot import core
 from bot.ai import agent
 from bot.chelovek.dispetcher import Dispetcher, Kanal
 from bot.chelovek.razbivka import Tempo
-from bot.config import Config, OpenRouterConfig, PgConfig
+from bot.config import Config, GoogleConfig, OpenRouterConfig, PgConfig
 from bot.core import Yadro
 from bot.pamyat import PamyatRedis
 from bot.profili import PROFILI, profil
+from bot.search.katalog import iz_fayla_praysa
+from bot.search.search import Poisk
 from bot.seed import AKKAUNTY
 
 BYSTRO = Tempo(
@@ -294,6 +297,7 @@ def _cfg() -> Config:
     return Config(
         pg=PgConfig(host="h", port=1, user="u", password="p", database="d", schema="s"),
         redis_url="redis://x", openrouter=CFG, log_level="info",
+        google=GoogleConfig(creds_put="", tablica_id="t", list_name="l", interval_s=600),
         telegram_tokeny={"saunamart": "", "sbsauna": "", "sbsauna_deshman": ""},
     )
 
@@ -378,6 +382,96 @@ async def test_neizvestnyy_akkaunt_padaet_ponyatno(monkeypatch):
     yadro, _, _ = await _yadro(monkeypatch, [])
     with pytest.raises(KeyError, match="Неизвестный аккаунт"):
         yadro.dispetcher("avito_next_year")
+
+
+# ── Горячая перезагрузка каталога (этап 16, A5) ──────────────────────────────
+
+class _FakeSessiya:
+    async def __aenter__(self):
+        return object()
+
+    async def __aexit__(self, *a):
+        return False
+
+
+def _fabrika_sessiy():
+    return _FakeSessiya()
+
+
+async def _yadro_dlya_perezagruzki() -> Yadro:
+    """Ядро с каталогом из файла (podgotovit без фабрики) + фабрика сессий,
+    подставленная руками: перезагрузку кормит подменённый `zagruzit_iz_bd`,
+    в реальную БД не ходим."""
+    yadro = Yadro(_cfg(), PamyatRedis(FakeRedis()), tempo=BYSTRO)
+    await yadro.podgotovit(["saunamart"])
+    yadro._fabrika_sessiy = _fabrika_sessiy
+    return yadro
+
+
+async def test_perezagruzka_menyaet_poisk_i_prompt(monkeypatch):
+    """Свежий каталог из БД без рестарта заменяет поиск и промпт целиком."""
+    yadro = await _yadro_dlya_perezagruzki()
+
+    async def _zagruzit(sessiya, kod):
+        return iz_fayla_praysa()
+    monkeypatch.setattr(core, "zagruzit_iz_bd", _zagruzit)
+
+    yadro._poiski["saunamart"] = "СТАРЫЙ"
+    yadro._prompty["saunamart"] = "старый промпт"
+    ok = await yadro.perezagruzit_katalog("saunamart")
+    assert ok is True
+    assert isinstance(yadro._poiski["saunamart"], Poisk)
+    assert "вагонка" in yadro._prompty["saunamart"].lower()
+
+
+async def test_bityy_sink_ne_zatiraet_rabochiy_katalog(monkeypatch):
+    """Синк в БД прошёл, а чтение назад упало — рабочий каталог остаётся."""
+    yadro = await _yadro_dlya_perezagruzki()
+
+    async def _padaet(sessiya, kod):
+        raise RuntimeError("соединение с БД потеряно")
+    monkeypatch.setattr(core, "zagruzit_iz_bd", _padaet)
+
+    yadro._poiski["saunamart"] = "РАБОЧИЙ"
+    ok = await yadro.perezagruzit_katalog("saunamart")
+    assert ok is False and yadro._poiski["saunamart"] == "РАБОЧИЙ"
+
+
+async def test_pustoy_katalog_ne_zatiraet_rabochiy(monkeypatch):
+    """Пустой каталог (гонка, кривой прайс) не должен обнулить бота."""
+    import types
+    yadro = await _yadro_dlya_perezagruzki()
+
+    async def _pusto(sessiya, kod):
+        return types.SimpleNamespace(gruppy=[])
+    monkeypatch.setattr(core, "zagruzit_iz_bd", _pusto)
+
+    yadro._poiski["saunamart"] = "РАБОЧИЙ"
+    ok = await yadro.perezagruzit_katalog("saunamart")
+    assert ok is False and yadro._poiski["saunamart"] == "РАБОЧИЙ"
+
+
+async def test_perezagruzka_uslug_nichego_ne_delaet(monkeypatch):
+    """У аккаунтов услуг каталога нет — перезагружать нечего, в БД не идём."""
+    yadro = await _yadro_dlya_perezagruzki()
+    hodili = False
+
+    async def _zagruzit(sessiya, kod):
+        nonlocal hodili
+        hodili = True
+        return iz_fayla_praysa()
+    monkeypatch.setattr(core, "zagruzit_iz_bd", _zagruzit)
+
+    ok = await yadro.perezagruzit_katalog("sbsauna")
+    assert ok is False and hodili is False
+
+
+async def test_perezagruzka_bez_fabriki_sessiy_ne_padaet():
+    """Ядро поднято без БД (файловый каталог) — перезагрузка просто пропускается."""
+    yadro = Yadro(_cfg(), PamyatRedis(FakeRedis()), tempo=BYSTRO)
+    await yadro.podgotovit(["saunamart"])       # fabrika=None
+    ok = await yadro.perezagruzit_katalog("saunamart")
+    assert ok is False
 
 
 # ── Адаптер Telegram ─────────────────────────────────────────────────────────

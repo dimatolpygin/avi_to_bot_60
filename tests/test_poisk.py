@@ -8,6 +8,7 @@
 Живая проверка — `python -m bot.search.probe` (набор из критериев приёмки)
 и `python -m bot.search.probe --iz-bd` (то же поверх БД).
 """
+from dataclasses import replace
 from decimal import Decimal
 
 import pytest
@@ -223,7 +224,83 @@ def test_kvadratnye_metry_tolko_u_vagonki(poisk):
     assert cena_za_metr_kvadratnyy(polok) is None
 
 
-def test_cena_za_kvadrat_schitaetsya_po_rabochey_shirine(poisk):
-    """171 ₽/м при рабочей ширине 88 мм → 11.36 м.п. в м² → 1943 ₽/м²."""
+def test_cena_za_kvadrat_schitaetsya_po_obshchey_shirine(poisk):
+    """Решение заказчика 28.07: м² считаем по ОБЩЕЙ ширине (95 мм), не рабочей (88).
+    Это ФОЛБЭК — из файла CSV колонки «цена за м2» нет, значит вычисляем:
+    171 ₽/м при общей ширине 95 мм → 10.53 м.п. в м² → 1800 ₽/м²."""
     vagonka = poisk.iskat("вагонка липа сорт а 3 метра")[0][0].pozitsiya
-    assert cena_za_metr_kvadratnyy(vagonka) == Decimal("1943.18")
+    assert vagonka.attrs.get("shirina_mm") == 95        # общая ширина доехала до каталога
+    assert vagonka.price_per_m2 is None                 # в файле колонки нет
+    assert cena_za_metr_kvadratnyy(vagonka) == Decimal("1800.00")
+
+
+def test_cena_za_kvadrat_iz_tablicy_beretsya_napryamuyu(poisk):
+    """Курс 31.07: если колонка «цена за м2» заполнена — берём её КАК ЕСТЬ,
+    не вычисляем (Виктор: «чтобы бот не высчитывал»). Значение плоское по сорту."""
+    vagonka = poisk.iskat("вагонка липа сорт а 3 метра")[0][0].pozitsiya
+    iz_tablicy = replace(vagonka, price_per_m2=Decimal("1305.00"))
+    assert cena_za_metr_kvadratnyy(iz_tablicy) == Decimal("1305.00")
+    # даже если вычисление дало бы другое — таблица приоритетнее
+    assert cena_za_metr_kvadratnyy(vagonka) == Decimal("1800.00")
+
+
+def test_u_polka_sluchaynaya_cena_za_kvadrat_ignoriruetsya(poisk):
+    """В живой таблице у одной строки полка (из 45) случайно проставлена цена
+    за м². Правило «у полка м² не бывает» сильнее опечатки: гейт по рабочей
+    ширине держит, стороннее значение не показываем."""
+    polok = poisk.iskat("полок липа 3 метра")[0][0].pozitsiya
+    assert polok.working_width_mm is None
+    s_opechatkoy = replace(polok, price_per_m2=Decimal("1950.00"))
+    assert cena_za_metr_kvadratnyy(s_opechatkoy) is None
+
+
+# ── Стратегия словарей: деградация и детектор пробелов (этап 16, блок B) ──────
+
+# Новая порода, которой нет в словарях: «мербау» отсутствует и в _PORODY (ETL),
+# и в sinonimy_atributov.json. Каталог из Google может её принести в любой день.
+_NOVAYA_PORODA = _stroka(60, "160001", "Вагонка Мербау сорт А 15х95 (88) L-2.5 м", "900")
+# Новое семейство: «абажур» — первое слово, которого нет в slovar_svodnyy.json.
+_NOVOE_SEMEYSTVO = _stroka(61, "160002", "Абажур банный липовый угловой", "1500")
+
+
+def test_novaya_poroda_nahoditsya_kanalom_nazvaniya():
+    """B1. Graceful degradation: товар с нераспознанной породой всё равно
+    находится каналом «название» (по слову из имени), а не молчит «нет такого».
+    Словарь про «мербау» не знает — фильтр по породе не включается, но позиция
+    достижима. Это и есть мягкая деградация: хуже, но не немо."""
+    poisk = Poisk(iz_polej([_polya_pozicii(s) for s in (*STROKI, _NOVAYA_PORODA)]))
+    nahodki, kanal = poisk.iskat("мербау")
+    assert kanal == "название"
+    assert any("Мербау" in n.pozitsiya.name for n in nahodki)
+
+
+def test_detektor_lovit_novuyu_porodu():
+    """B3. Детектор пробелов: у вагонки species=None (породы «мербау» нет
+    в словаре) — сигнал, что породу надо завести в словари."""
+    from bot.search.pokrytie import proverit_pokrytie
+    from bot.search.slovari import slovari
+
+    katalog = iz_polej([_polya_pozicii(s) for s in (*STROKI, _NOVAYA_PORODA)])
+    preduprezhdeniya = proverit_pokrytie(katalog, slovari())
+    assert any("мербау" in p.lower() or "Мербау" in p for p in preduprezhdeniya)
+
+
+def test_detektor_lovit_novoe_semeystvo():
+    """B3. Новое семейство «абажур» не в slovar_svodnyy.json — детектор говорит
+    добавить его, иначе клиент не найдёт товар по типу."""
+    from bot.search.pokrytie import proverit_pokrytie
+    from bot.search.slovari import slovari
+
+    katalog = iz_polej([_polya_pozicii(s) for s in (*STROKI, _NOVOE_SEMEYSTVO)])
+    preduprezhdeniya = proverit_pokrytie(katalog, slovari())
+    assert any("абажур" in p.lower() for p in preduprezhdeniya)
+
+
+def test_detektor_molchit_na_pokrytom_kataloge():
+    """Без новых слов детектор молчит: иначе на каждом синке был бы ложный шум,
+    и настоящий сигнал в нём бы потонул."""
+    from bot.search.pokrytie import proverit_pokrytie
+    from bot.search.slovari import slovari
+
+    katalog = iz_polej([_polya_pozicii(s) for s in STROKI])
+    assert proverit_pokrytie(katalog, slovari()) == []

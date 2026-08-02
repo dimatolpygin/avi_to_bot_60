@@ -116,6 +116,9 @@ def _polya_pozicii(s: StrokaPraysa) -> dict:
         "unit": "linear_m" if r.length_m else "piece",
         "price_apiece": s.price_apiece,
         "price_per_m": cena_m,
+        # Цена за м² из таблицы напрямую (курс 31.07). Пусто → в БД NULL,
+        # а фолбэк-вычисление живёт в `cena_za_metr_kvadratnyy` на выдаче.
+        "price_per_m2": s.price_per_m2_fayl,
         "is_package": r.is_package,
         "availability": _nalichie(s.nalichie_syroe),
         "characteristics": s.characteristics,
@@ -169,73 +172,85 @@ def _otlichaetsya(bylo: Product, stalo: dict) -> list[str]:
     return izmenilos
 
 
+async def zapisat_prays(prays: Prays, kod_akkaunta: str, Sessiya) -> Itogi:
+    """Записать уже прочитанный и проверенный `Prays` в БД одной транзакцией.
+
+    Ядро импорта без привязки к источнику: сюда приходит готовый `Prays` —
+    из файла (`importirovat`) или из Google-таблицы (фоновый синк этапа 16).
+    Свой engine не создаёт: фабрику сессий даёт вызывающий (у синка она уже
+    есть, CLI её создаёт в `importirovat`). Вся запись — в одной транзакции:
+    упали на середине → в БД остаётся вчерашний прайс целиком.
+    """
+    stroki, dubley, _ = shlopnut_dubli(prays.stroki)
+    rashozhdeniy = _sverit_invariant(prays.stroki)
+    itogi = Itogi(vsego=len(stroki), dubley=dubley, rashozhdeniy_ceny=rashozhdeniy)
+
+    async with Sessiya() as sess, sess.begin():
+        akkaunt_id = await sess.scalar(
+            select(Account.id).where(Account.code == kod_akkaunta))
+        if not akkaunt_id:
+            raise OshibkaPraysa(
+                f"❌ В БД нет аккаунта «{kod_akkaunta}».\n"
+                f"   Сначала засей справочники: python -m bot.seed"
+            )
+
+        bylo = {p.article: p for p in (await sess.scalars(
+            select(Product).where(Product.account_id == akkaunt_id))).all()}
+        logger.info("📦 В БД сейчас позиций аккаунта «%s»: %d", kod_akkaunta, len(bylo))
+
+        v_fayle: set[str] = set()
+        for s in stroki:
+            polya = _polya_pozicii(s)
+            v_fayle.add(polya["article"])
+            pozicia = bylo.get(polya["article"])
+            if pozicia is None:
+                sess.add(Product(account_id=akkaunt_id, **polya))
+                itogi.dobavleno += 1
+                continue
+            izmenilos = _otlichaetsya(pozicia, polya)
+            if not izmenilos:
+                itogi.bez_izmeneniy += 1
+                continue
+            for pole in izmenilos:
+                setattr(pozicia, pole, polya[pole])
+            itogi.obnovleno += 1
+            logger.info("📦 Обновляю %s «%s»: %s",
+                        polya["article"], polya["name"][:45], ", ".join(izmenilos))
+
+        # Исчезла из файла — гасим, но оставляем в каталоге: на позицию
+        # могут ссылаться диалоги, а заказчик может вернуть её завтра.
+        for artikul, pozicia in bylo.items():
+            if artikul not in v_fayle and pozicia.is_active:
+                pozicia.is_active = False
+                itogi.pogasheno += 1
+                logger.info("📦 Позиции %s «%s» больше нет в прайсе — гашу",
+                            artikul, pozicia.name[:45])
+
+        sess.add(PriceMeta(
+            account_id=akkaunt_id,
+            source_file=prays.istochnik,
+            price_date=prays.data_praysa,
+            rows_total=itogi.vsego,
+            inserted=itogi.dobavleno,
+            updated=itogi.obnovleno,
+            deactivated=itogi.pogasheno,
+        ))
+
+    logger.info("📦 Импорт завершён: добавлено %d, обновлено %d, без изменений %d, "
+                "погашено %d (позиций в источнике: %d)",
+                itogi.dobavleno, itogi.obnovleno, itogi.bez_izmeneniy,
+                itogi.pogasheno, itogi.vsego)
+    return itogi
+
+
 async def importirovat(put: str, kod_akkaunta: str = AKKAUNT_PO_UMOLCHANIYU) -> Itogi:
     """Прочитать файл, проверить, положить в БД одной транзакцией."""
     prays = prochitat(put)                       # падает ДО подключения к БД
-    stroki, dubley, _ = shlopnut_dubli(prays.stroki)
-    rashozhdeniy = _sverit_invariant(prays.stroki)
-
     cfg = load_config()
     engine = await podklyuchit(cfg)
     Sessiya = sozdat_fabriku_sessiy(engine)
-    itogi = Itogi(vsego=len(stroki), dubley=dubley, rashozhdeniy_ceny=rashozhdeniy)
     try:
-        async with Sessiya() as sess, sess.begin():
-            akkaunt_id = await sess.scalar(
-                select(Account.id).where(Account.code == kod_akkaunta))
-            if not akkaunt_id:
-                raise OshibkaPraysa(
-                    f"❌ В БД нет аккаунта «{kod_akkaunta}».\n"
-                    f"   Сначала засей справочники: python -m bot.seed"
-                )
-
-            bylo = {p.article: p for p in (await sess.scalars(
-                select(Product).where(Product.account_id == akkaunt_id))).all()}
-            logger.info("📦 В БД сейчас позиций аккаунта «%s»: %d", kod_akkaunta, len(bylo))
-
-            v_fayle: set[str] = set()
-            for s in stroki:
-                polya = _polya_pozicii(s)
-                v_fayle.add(polya["article"])
-                pozicia = bylo.get(polya["article"])
-                if pozicia is None:
-                    sess.add(Product(account_id=akkaunt_id, **polya))
-                    itogi.dobavleno += 1
-                    continue
-                izmenilos = _otlichaetsya(pozicia, polya)
-                if not izmenilos:
-                    itogi.bez_izmeneniy += 1
-                    continue
-                for pole in izmenilos:
-                    setattr(pozicia, pole, polya[pole])
-                itogi.obnovleno += 1
-                logger.info("📦 Обновляю %s «%s»: %s",
-                            polya["article"], polya["name"][:45], ", ".join(izmenilos))
-
-            # Исчезла из файла — гасим, но оставляем в каталоге: на позицию
-            # могут ссылаться диалоги, а заказчик может вернуть её завтра.
-            for artikul, pozicia in bylo.items():
-                if artikul not in v_fayle and pozicia.is_active:
-                    pozicia.is_active = False
-                    itogi.pogasheno += 1
-                    logger.info("📦 Позиции %s «%s» больше нет в прайсе — гашу",
-                                artikul, pozicia.name[:45])
-
-            sess.add(PriceMeta(
-                account_id=akkaunt_id,
-                source_file=prays.istochnik,
-                price_date=prays.data_praysa,
-                rows_total=itogi.vsego,
-                inserted=itogi.dobavleno,
-                updated=itogi.obnovleno,
-                deactivated=itogi.pogasheno,
-            ))
-
-        logger.info("📦 Импорт завершён: добавлено %d, обновлено %d, без изменений %d, "
-                    "погашено %d (позиций в файле: %d)",
-                    itogi.dobavleno, itogi.obnovleno, itogi.bez_izmeneniy,
-                    itogi.pogasheno, itogi.vsego)
-        return itogi
+        return await zapisat_prays(prays, kod_akkaunta, Sessiya)
     finally:
         await zakryt(engine)
 

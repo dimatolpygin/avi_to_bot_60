@@ -46,7 +46,7 @@ PROVERKA: list[tuple[str, str]] = [
     ("сколько нужно вагонки на парную 2 на 3",
      "расчёт не делает, честно отправляет к менеджеру"),
     ("а почём квадратный метр вагонки липа",
-     "цена за м² названа с оговоркой про рабочую ширину"),
+     "цена за м² названа сразу (это основная цена), считается по общей ширине"),
     ("продаёте болгарку?",
      "не наш профиль, коротко и без поиска по прайсу"),
     ("камни для печки есть",
@@ -84,7 +84,8 @@ def _dopustimye_chisla(poisk: Poisk, sistemny: str) -> set[int]:
     dopustimye: set[int] = set()
     for gruppa in poisk.katalog.gruppy:
         for p in gruppa.pozitsii:
-            dopustimye.add(int(p.article))
+            if p.article.isdigit():        # у ЭКМ ключ синтетический (nomen-…)
+                dopustimye.add(int(p.article))
             for cena in (p.price_apiece, p.price_per_m):
                 if cena is not None:
                     dopustimye.update(_okrestnost(cena))

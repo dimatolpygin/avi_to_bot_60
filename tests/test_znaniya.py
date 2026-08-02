@@ -10,7 +10,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from bot.config import Config, OpenRouterConfig, PgConfig
+from bot.config import Config, GoogleConfig, OpenRouterConfig, PgConfig
 from bot.core import Yadro
 from bot.pamyat import PamyatRedis
 from bot.znaniya import (Blok, bloki_akkaunta, prompt_iz_bd, prompt_iz_koda,
@@ -186,6 +186,7 @@ def _cfg() -> Config:
         redis_url="redis://x",
         openrouter=OpenRouterConfig(api_key="k", model="m", base_url="u"),
         log_level="info",
+        google=GoogleConfig(creds_put="", tablica_id="t", list_name="l", interval_s=600),
         telegram_tokeny={"saunamart": "", "sbsauna": "", "sbsauna_deshman": ""},
     )
 

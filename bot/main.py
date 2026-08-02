@@ -103,13 +103,33 @@ async def main() -> None:
         if not zhivye:
             logger.info("📡 Токенов Telegram в .env нет — каналы не поднимаются")
 
+        fabrika_sessiy = db.sozdat_fabriku_sessiy(engine)
         yadro = sozdat_yadro(cfg, redis_client)
-        await yadro.podgotovit(zhivye, db.sozdat_fabriku_sessiy(engine))
+        await yadro.podgotovit(zhivye, fabrika_sessiy)
 
         _ustanovit_signaly(stop)
         tasks = [asyncio.create_task(
             _supervise(kod, _kanal_telegram(kod, cfg.telegram_tokeny[kod], yadro)), name=kod)
             for kod in zhivye]
+
+        # Живой каталог из Google-таблицы (этап 16): фоновый синк в БД раз в
+        # ~10 минут. Поднимаем только когда синк включён (задан ключ) и товарный
+        # бот реально работает — каталог в память перегружать некому иначе.
+        # После записи в БД синк горячо перезагружает каталог в памяти (A5).
+        if cfg.google.vklyuchena and "saunamart" in zhivye:
+            from . import sinhronizatsiya
+
+            async def _perezagruzit() -> None:
+                await yadro.perezagruzit_katalog("saunamart")
+
+            tasks.append(asyncio.create_task(
+                _supervise("синк-каталога",
+                           lambda: sinhronizatsiya.cikl_sinhronizatsii(
+                               cfg, fabrika_sessiy, stop, posle_zapisi=_perezagruzit)),
+                name="синк-каталога"))
+        elif cfg.google.vklyuchena:
+            logger.info("🔄 Синк каталога включён, но бот saunamart не поднят — синк не запускаю")
+
         if not tasks:
             tasks.append(asyncio.create_task(_puls(stop), name="пульс"))
 

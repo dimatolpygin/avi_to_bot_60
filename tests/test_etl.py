@@ -12,8 +12,10 @@ from decimal import Decimal
 
 import pytest
 
+from datetime import datetime, timezone
+
 from bot.etl.chtenie import (MINIMUM_STROK, OshibkaPraysa, StrokaPraysa,
-                             prochitat, shlopnut_dubli)
+                             prochitat, shlopnut_dubli, sobrat_prays)
 from bot.etl.import_prays import _cena_za_metr, _nalichie, _otlichaetsya, _polya_pozicii
 from bot.etl.razbor import razobrat
 
@@ -239,6 +241,98 @@ def test_stroki_bez_ceny_propuskayutsya_a_ne_lozhatsya_nulem(tmp_path):
         csv.writer(f).writerow(["99999", "Доска липа необрезная", "", "", ""])
     prays = prochitat(put)
     assert all(s.article != "99999" for s in prays.stroki)
+
+
+# ── Общее ядро и русские заголовки (источник Google, курс 31.07) ──────────────
+
+def _russkiy_list(skolko=MINIMUM_STROK + 5):
+    """Сырые строки в форме `get_all_values` живой Google-таблицы: слева пустая
+    колонка, заголовок первой строкой, все ячейки — строки, русские имена цен."""
+    zagolovok = ["", "article", "nomenclature", "characteristics",
+                 "цена штука", "цена м.п.", "цена за м2", "Наличие"]
+    stroki = [zagolovok]
+    for i in range(skolko):
+        stroki.append(["", f"1{i:04d}", "Вагонка Липа сорт В 15х95 (88) L-1.0 м",
+                       "", "85", "85", "890", "Да"])
+    return stroki
+
+
+def _sobrat(syrye):
+    return sobrat_prays(syrye, "тест", datetime.now(timezone.utc), "тест")
+
+
+def test_russkie_zagolovki_ceny_raspoznayutsya():
+    """Живая таблица несёт «цена штука», а не «price_apiece» — читаем оба диалекта."""
+    prays = _sobrat(_russkiy_list())
+    assert prays.vsego_strok == MINIMUM_STROK + 5
+    assert prays.stroki[0].price_apiece == Decimal("85")
+    assert prays.stroki[0].nalichie_syroe == "Да"
+
+
+def test_zagolovok_ne_pervoy_strokoy_nahoditsya():
+    """Как в CSV-выгрузке: сверху две мусорные строки, заголовок ниже."""
+    syrye = [["мусор"], [""], *_russkiy_list()]
+    prays = _sobrat(syrye)
+    assert prays.vsego_strok == MINIMUM_STROK + 5
+
+
+def test_pustoy_list_padaet_ponyatno():
+    with pytest.raises(OshibkaPraysa) as e:
+        _sobrat([])
+    assert "пуст" in str(e.value)
+
+
+def test_yacheyki_strokami_ne_lomayut_privedenie():
+    """gspread отдаёт всё строками, пустое — "" (не None): цена и артикул должны
+    привестись, а "" в цене за метр не стать нулём."""
+    prays = _sobrat(_russkiy_list())
+    s = prays.stroki[0]
+    assert s.article == "10000" and s.price_apiece == Decimal("85")
+    assert s.price_per_meter_fayl == Decimal("85")
+
+
+def test_cena_za_m2_iz_kolonki_dohodit_do_stroki():
+    """Колонка «цена за м2» живой таблицы должна доехать до StrokaPraysa."""
+    prays = _sobrat(_russkiy_list())
+    assert prays.stroki[0].price_per_m2_fayl == Decimal("890")
+
+
+# ── Позиции без артикула: «мягкий ассортимент» ЭКМ (курс 31.07) ────────────────
+
+def _ekm(cena="15000"):
+    """Строка ЭКМ как в живой таблице: артикула нет, цена есть, наличие «Да»."""
+    return ["", "", "Электрокаменка ЭКМ 6 кВт «Зевс»", "", cena, "", "", "Да"]
+
+
+def test_stroka_bez_artikula_ne_teryaetsya_a_kliuchitsya_po_nazvaniyu():
+    """11 ЭКМ без SKU — «мягкий ассортимент»: держим их, ключ по номенклатуре."""
+    prays = _sobrat([*_russkiy_list(), _ekm()])
+    ekm = [s for s in prays.stroki if s.article.startswith("nomen-")]
+    assert len(ekm) == 1
+    assert ekm[0].name.startswith("Электрокаменка") and ekm[0].price_apiece == Decimal("15000")
+
+
+def test_kliuch_bez_artikula_stabilen_mezhdu_progonami():
+    """Ключ выведен из названия и не должен «плавать»: иначе повторный синк
+    задвоит ЭКМ (старый ключ гасится, новый вставляется)."""
+    a = _sobrat([*_russkiy_list(), _ekm()]).stroki[-1].article
+    b = _sobrat([*_russkiy_list(), _ekm()]).stroki[-1].article
+    assert a == b and a.startswith("nomen-")
+
+
+def test_stroka_bez_artikula_derzhitsya_dazhe_bez_ceny():
+    """Заказчик сотрёт цену ЭКМ — позиция всё равно в каталоге («есть, уточню»),
+    в отличие от строки С артикулом, где пустая цена = порча данных."""
+    prays = _sobrat([*_russkiy_list(), _ekm(cena="")])
+    ekm = [s for s in prays.stroki if s.article.startswith("nomen-")]
+    assert len(ekm) == 1 and ekm[0].price_apiece is None
+
+
+def test_stroka_s_artikulom_bez_ceny_po_prezhnemu_propuskaetsya():
+    """Пустая цена у позиции С артикулом — это по-прежнему пропуск (защита данных)."""
+    bityy = ["", "199999", "Вагонка Липа сорт В 15х95 (88) L-1.0 м", "", "", "", "", "Да"]
+    prays = _sobrat([*_russkiy_list(), bityy])
+    assert all(s.article != "199999" for s in prays.stroki)
 
 
 # ── Дубли ────────────────────────────────────────────────────────────────────

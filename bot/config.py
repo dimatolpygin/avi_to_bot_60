@@ -73,10 +73,30 @@ class OpenRouterConfig:
 
 
 @dataclass(frozen=True)
+class GoogleConfig:
+    """Живой источник прайса — Google-таблица заказчика (курс 31.07, этап 16).
+
+    Пустой `creds_put` = синхронизация выключена, и это штатный режим, а не
+    ошибка: бот работает из БД/файла, как раньше. Ключ сервисного аккаунта
+    лежит вне git — сюда попадает только путь к нему, никогда содержимое.
+    """
+
+    creds_put: str        # путь к service-account.json; пусто → синк выключен
+    tablica_id: str
+    list_name: str
+    interval_s: int       # период фоновой синхронизации, сек
+
+    @property
+    def vklyuchena(self) -> bool:
+        return bool(self.creds_put.strip())
+
+
+@dataclass(frozen=True)
 class Config:
     pg: PgConfig
     redis_url: str
     openrouter: OpenRouterConfig
+    google: GoogleConfig
     log_level: str
     # Три Telegram-бота обкатки (этап 10): код аккаунта → токен. Пустой токен →
     # бот не поднимается, соседи работают.
@@ -89,6 +109,10 @@ class Config:
 
 def load_config() -> Config:
     """Собрать конфиг и проверить обязательные переменные. Звать при старте."""
+    # Дефолты id таблицы и листа живут в etl.google_prays (там же читалка) —
+    # берём их оттуда, чтобы не задваивать реальный id в двух местах.
+    from .etl.google_prays import LIST_PO_UMOLCHANIYU, TABLICA_ID_PO_UMOLCHANIYU
+
     return Config(
         pg=PgConfig(
             host=os.environ.get("PGHOST", "127.0.0.1"),
@@ -102,6 +126,12 @@ def load_config() -> Config:
         openrouter=OpenRouterConfig(
             api_key=(os.environ.get("OPENROUTER_API_KEY") or "").strip(),
             model=os.environ.get("OPENROUTER_MODEL", "anthropic/claude-haiku-4.5"),
+        ),
+        google=GoogleConfig(
+            creds_put=(os.environ.get("GOOGLE_CREDS_PUT") or "").strip(),
+            tablica_id=(os.environ.get("GOOGLE_TABLICA_ID") or "").strip() or TABLICA_ID_PO_UMOLCHANIYU,
+            list_name=(os.environ.get("GOOGLE_LIST") or "").strip() or LIST_PO_UMOLCHANIYU,
+            interval_s=_int("GOOGLE_SYNC_INTERVAL_S", 600),
         ),
         log_level=(os.environ.get("LOG_LEVEL") or "info").strip().lower(),
         telegram_tokeny={

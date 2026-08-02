@@ -127,6 +127,11 @@ class Product(Base, VremennyeMetki):
     unit: Mapped[str] = mapped_column(PriceUnit, nullable=False, server_default=text("'piece'"))
     price_apiece: Mapped[Decimal | None] = mapped_column(Numeric(12, 2))
     price_per_m: Mapped[Decimal | None] = mapped_column(Numeric(12, 2))
+    # Цена за м² — с курса 31.07 берётся из отдельной колонки таблицы НАПРЯМУЮ
+    # (плоская по сорту), не вычисляется. Пусто = колонки нет или не заполнена →
+    # вычисляем как фолбэк в `cena_za_metr_kvadratnyy`. У полка пустая всегда:
+    # рабочей ширины нет, м² бессмыслен (гейт держит поиск, не эта колонка).
+    price_per_m2: Mapped[Decimal | None] = mapped_column(Numeric(12, 2))
     # Позиция продаётся упаковкой («Фольга алюминиевая 12 м2», «уп.10кг») — цену делить нельзя.
     is_package: Mapped[bool] = mapped_column(Boolean, nullable=False,
                                              server_default=text("false"))
