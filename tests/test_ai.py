@@ -168,14 +168,14 @@ def test_nesovpavshaya_dlina_pomechena(poisk):
     assert p["цена_за_штуку_по_длинам"] == {"2.5": 428, "3": 513}
 
 
-def test_kvadratnyy_metr_prihodit_s_ogovorkoy(poisk):
+def test_kvadratnyy_metr_osnovnaya_cena(poisk):
+    """Заказчик 28.07: цена за м² — то, что спрашивают, с неё и начинаем; считаем
+    по общей ширине (95 мм) → 171 × 10.53 = 1800, без копеек."""
     nahodki, kanal = poisk.iskat("вагонка липа сорт а 3 метра")
     p = agent.payload_poiska(nahodki, kanal, "")["найдено"][0]
     kv = p["цена_за_квадратный_метр"]
-    # Целые рубли: 1943.18 модель озвучивает как «рубль восемнадцать копеек»,
-    # а живой менеджер копейки не называет.
-    assert kv["значение"] == 1943
-    assert "ТОЛЬКО" in kv["как_использовать"]
+    assert kv["значение"] == 1800
+    assert "начинай" in kv["как_использовать"]
 
 
 def test_cena_za_metr_bez_kopeek(poisk):
@@ -348,8 +348,7 @@ def test_assortiment_sobiraetsya_iz_kataloga(poisk):
 
 def test_prompt_soderzhit_klyuchevye_pravila(poisk):
     prompt = agent.sobrat_prompt(poisk.katalog)
-    for pravilo in ("Сорт Б", "НЕ проси", "рабочей ширине",
-                    "Александра", "квадратный метр"):
+    for pravilo in ("Сорт Б", "НЕ проси", "КВАДРАТНЫЙ МЕТР", "Александра"):
         assert pravilo in prompt, f"из промпта пропало правило: {pravilo}"
     # Контакт: спросить можно, но один раз и по делу. Обе половины правила
     # обязаны стоять рядом — без первой лид не появится, без второй бот клянчит.
