@@ -144,6 +144,23 @@ def test_slovari_gruzyatsya_i_ne_pusty():
     assert sl.dver_gabarit["стандартная"] == (1900, 700)
 
 
+def test_porody_v_dvuh_istochnikah_soglasovany():
+    """Единый источник пород (этап 16, B2). Породы захардкожены ДВАЖДЫ:
+    `bot/etl/razbor.py` (`_PORODY`, кладёт `species` в каталог) и
+    `data/sinonimy_atributov.json` (распознаёт породу в запросе). Ключи второго
+    ОБЯЗАНЫ совпадать со списком первого: поправишь одно, забудешь второе —
+    у товаров `species` есть, а запрос его не находит (или наоборот), и фильтр
+    по породе молча ломается. Этот тест — и есть «сведение к одному источнику»:
+    расхождение падает здесь, а не в живом диалоге."""
+    import json
+
+    from bot.etl.razbor import _PORODY
+
+    with open(f"{KATALOG_DANNYH}/sinonimy_atributov.json", encoding="utf-8") as f:
+        porody_slovarya = {k for k in json.load(f)["порода"] if not k.startswith("_")}
+    assert set(_PORODY) == porody_slovarya
+
+
 # ── Критерии приёмки этапа 5 ─────────────────────────────────────────────────
 
 def test_sort_b_i_sort_v_dayut_odinakovyy_razbor():
