@@ -166,11 +166,24 @@ def test_opisanie_pogonazh_tolko_kachestvo_bez_razmerov():
 
 
 def test_opisanie_pogonazh_bez_sorta_nichego_ne_daet():
-    """Нет качественной части («Сорт …») — отдавать один размерный зачин нельзя:
-    он про другой товар. Кейс дуба: «вагонка из дуба 1 метровые доски» → ничего."""
+    """Нет качественной части (ни сорта, ни сучков) — отдавать один размерный
+    зачин нельзя: он про другой товар. Кейс дуба: «вагонка из дуба 1 метровые
+    доски» → ничего."""
     from types import SimpleNamespace
     p = SimpleNamespace(family="вагонка", characteristics="вагонка из дуба 1 метровые доски")
     assert agent._opisanie_dlya_modeli(p) is None
+
+
+def test_opisanie_pogonazh_lovit_suchki_bez_slova_sort():
+    """Качество бывает выражено без слова «сорт» — прямо «…с сучками». Раньше такое
+    описание отбрасывалось целиком (якорь только «Сорт»), и бот отвечал «нет
+    информации о сучках» при том, что она в описании есть. Живой кейс термоосины."""
+    from types import SimpleNamespace
+    p = SimpleNamespace(family="вагонка",
+                        characteristics="вагонка термоосина 3 метровые доски с сучками")
+    opis = agent._opisanie_dlya_modeli(p)
+    assert opis == "с сучками"                       # размерный зачин отрезан
+    assert "3 метровые" not in opis
 
 
 def test_opisanie_pechi_tselikom():
