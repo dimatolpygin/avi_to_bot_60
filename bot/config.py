@@ -8,7 +8,7 @@
 требовать код тех этапов, когда заказчик их выдаст.
 """
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from dotenv import load_dotenv
 
@@ -92,6 +92,26 @@ class GoogleConfig:
 
 
 @dataclass(frozen=True)
+class AvitoConfig:
+    """OAuth-приложение Авито одного аккаунта (этап 14).
+
+    `client_credentials`: бот сам меняет client_id/secret на access_token и
+    продлевает его. `user_id` = id аккаунта Авито (тот, что в путях messenger
+    API); 0 → определить лениво через `/core/v1/accounts/self`, чтобы не хранить
+    его руками. Незаполненные креды = аккаунт на Авито не поднимается (как пустой
+    токен Telegram), это штатный выключатель, а не ошибка.
+    """
+
+    client_id: str
+    client_secret: str
+    user_id: int = 0
+
+    @property
+    def zapolnen(self) -> bool:
+        return bool(self.client_id.strip() and self.client_secret.strip())
+
+
+@dataclass(frozen=True)
 class Config:
     pg: PgConfig
     redis_url: str
@@ -101,6 +121,9 @@ class Config:
     # Три Telegram-бота обкатки (этап 10): код аккаунта → токен. Пустой токен →
     # бот не поднимается, соседи работают.
     telegram_tokeny: dict[str, str]
+    # Боевые аккаунты Авито (этап 14): код аккаунта → OAuth-приложение. Дефолт
+    # пустой, чтобы обкаточные конструкторы Config (тесты) не требовали кред.
+    avito: dict[str, "AvitoConfig"] = field(default_factory=dict)
 
     @property
     def debug_logi(self) -> bool:
@@ -139,4 +162,18 @@ def load_config() -> Config:
             "sbsauna": (os.environ.get("TG_TOKEN_SBSAUNA") or "").strip(),
             "sbsauna_deshman": (os.environ.get("TG_TOKEN_DESHMAN") or "").strip(),
         },
+        avito={
+            "saunamart": _avito("SAUNAMART"),
+            "sbsauna": _avito("SBSAUNA"),
+            "sbsauna_deshman": _avito("DESHMAN"),
+        },
+    )
+
+
+def _avito(suffiks: str) -> "AvitoConfig":
+    """Собрать креды Авито одного аккаунта из .env по суффиксу кода."""
+    return AvitoConfig(
+        client_id=(os.environ.get(f"AVITO_CLIENT_ID_{suffiks}") or "").strip(),
+        client_secret=(os.environ.get(f"AVITO_CLIENT_SECRET_{suffiks}") or "").strip(),
+        user_id=_int(f"AVITO_USER_ID_{suffiks}", 0),
     )
