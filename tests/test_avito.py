@@ -12,7 +12,8 @@ import httpx
 import pytest
 
 from bot.channels.avito import (AvitoAPI, OshibkaAvito, Vidennye, Vhodyashchee,
-                                 cikl_pollinga, izvlech_vhodyashchee)
+                                 cikl_pollinga, izvlech_vhodyashchee,
+                                 sdelat_obrabotchik)
 from bot.config import AvitoConfig
 
 CFG = AvitoConfig(client_id="cid", client_secret="sec", user_id=23598618)
@@ -173,3 +174,57 @@ async def test_cikl_zovet_obrabotchik_odin_raz_na_soobshchenie():
     assert otdano["chats_calls"] >= 2       # цикл реально крутанулся не раз
     assert len(poluchennye) == 1            # один и тот же msg → одна обработка
     assert poluchennye[0].tekst == "привет"
+
+
+# ── Режим ответа: белый список, вложение, объявление (14.2) ───────────────────
+
+class _FakeYadro:
+    def __init__(self):
+        self.obrabotano = []      # (kod, chat, tekst)
+        self.obyavleniya = []     # (kod, chat, obyavlenie)
+
+    def zapomnit_obyavlenie(self, kod, chat, obyavlenie):
+        self.obyavleniya.append((kod, chat, obyavlenie))
+
+    def obrabotat(self, kod, chat, tekst, kanal):
+        self.obrabotano.append((kod, chat, tekst))
+
+
+class _FakeAPI:
+    def __init__(self):
+        self.otpravleno = []
+
+    async def otpravit(self, chat_id, tekst):
+        self.otpravleno.append((chat_id, tekst))
+
+
+async def test_belyy_spisok_propuskaet_tolko_svoi_chaty():
+    ya, api = _FakeYadro(), _FakeAPI()
+    obr = sdelat_obrabotchik("sbsauna", api, ya, frozenset({"c-test"}))
+
+    await obr(izvlech_vhodyashchee(_chat_vhod(chat_id="c-test", text="привет")))
+    await obr(izvlech_vhodyashchee(_chat_vhod(chat_id="c-klient", text="здрасте")))
+
+    assert [o[1] for o in ya.obrabotano] == ["c-test"]   # чужой чат не обработан
+
+
+async def test_vlozhenie_bez_teksta_prosit_tekstom_ne_zovet_yadro():
+    ya, api = _FakeYadro(), _FakeAPI()
+    obr = sdelat_obrabotchik("sbsauna", api, ya, None)   # None → отвечаем всем
+    chat = {"id": "c1", "last_message": {"id": "m1", "direction": "in", "content": {}}}
+
+    await obr(izvlech_vhodyashchee(chat))
+
+    assert ya.obrabotano == []                           # ядру вложение не отдаём
+    assert api.otpravleno and "текстом" in api.otpravleno[0][1]
+
+
+async def test_obyavlenie_zapominaetsya_pered_obrabotkoy():
+    ya, api = _FakeYadro(), _FakeAPI()
+    obr = sdelat_obrabotchik("sbsauna", api, ya, None)
+    v = izvlech_vhodyashchee(_chat_vhod(chat_id="c1", text="сколько стоит",
+                                        item={"title": "Отделка под ключ", "price_string": "от 74 000 ₽"}))
+    await obr(v)
+
+    assert ya.obyavleniya == [("sbsauna", "c1", v.obyavlenie)]
+    assert ya.obrabotano == [("sbsauna", "c1", "сколько стоит")]

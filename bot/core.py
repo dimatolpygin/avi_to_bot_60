@@ -48,6 +48,10 @@ class Yadro:
         self._poiski: dict[str, Poisk] = {}
         self._prompty: dict[str, str] = {}
         self._data_praysa: dict[str, str] = {}
+        # Объявление, под которым клиент пишет (Авито, этап 14): ключ диалога →
+        # готовый факт для промпта. Заполняет адаптер Авито перед `obrabotat`,
+        # читает замыкание `_otvechat`. У Telegram объявлений нет — словарь пуст.
+        self._obyavleniya: dict[str, str] = {}
 
     # ── Подготовка ───────────────────────────────────────────────────────────
 
@@ -171,11 +175,37 @@ class Yadro:
                 self._poiski.get(prof.kod),           # None у аккаунтов услуг
                 istoriya, vopros,
                 data_praysa=self._data_praysa.get(prof.kod, ""),
-                sistemny=self._prompty.get(prof.kod) or None,
+                sistemny=self._sistemny(prof.kod, klyuch),
                 peredat_lead=self._peredat_lead(prof.kod, klyuch),
             )
             return rezultat.otvet
         return otvechat
+
+    def _sistemny(self, kod: str, klyuch: str) -> str | None:
+        """Системный промпт аккаунта плюс факт объявления, если он есть.
+
+        Объявление — это отдельный факт под конкретный чат (Авито), а не часть
+        промпта аккаунта: у соседнего чата оно другое. Поэтому подмешивается
+        здесь, по ключу диалога, а не зашивается в общий промпт.
+        """
+        baza = self._prompty.get(kod) or None
+        fakt = self._obyavleniya.get(klyuch)
+        if not fakt:
+            return baza
+        return f"{baza}\n\n{fakt}" if baza else fakt
+
+    def zapomnit_obyavlenie(self, kod: str, chat: str | int, obyavlenie: dict | None) -> None:
+        """Запомнить/забыть объявление, под которым идёт диалог (зовёт адаптер Авито).
+
+        Пусто/None → факт снимается: чат мог отвязаться, и старое объявление
+        подмешивать нельзя. Telegram эту функцию не зовёт вовсе.
+        """
+        klyuch = Dispetcher.klyuch(kod, chat)
+        fakt = _fakt_obyavleniya(obyavlenie) if obyavlenie else ""
+        if fakt:
+            self._obyavleniya[klyuch] = fakt
+        else:
+            self._obyavleniya.pop(klyuch, None)
 
     def _peredat_lead(self, kod: str, klyuch: str):
         """Куда уходит контакт, который клиент оставил сам.
@@ -213,6 +243,27 @@ class Yadro:
     async def ostanovit(self) -> None:
         for d in self._dispetchery.values():
             await d.ostanovit()
+
+
+def _fakt_obyavleniya(o: dict) -> str:
+    """Короткий факт для промпта из объявления Авито (`context.value`).
+
+    Не пересказ прайса, а подсказка «клиент смотрит вот это». Оговорки — те же,
+    что всюду: объёмы по объявлению не считаем, гейт «не наш профиль» остаётся
+    выше. Смысл — чтобы на пустую выдачу поиска бот ответил про объявление,
+    а не «нет такой позиции» (баг старого бота под объявлением «Доска обрезная»).
+    """
+    title = (o.get("title") or "").strip()
+    if not title:
+        return ""
+    price = (o.get("price_string") or "").strip()
+    hvost = f", цена {price}" if price else ""
+    return (
+        f"ФАКТ: клиент пишет под объявлением «{title}»{hvost}. Это подсказка о том, "
+        f"что он смотрит, а не прайс — объёмы по объявлению не считай, гейт «не наш "
+        f"профиль» остаётся выше. Если по прайсу товар не нашёлся, но вопрос про это "
+        f"объявление — ответь про него (что это и цена), а не «нет такой позиции»."
+    )
 
 
 def _data_praysa() -> str:

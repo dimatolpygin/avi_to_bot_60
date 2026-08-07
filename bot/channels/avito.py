@@ -25,6 +25,7 @@ from dataclasses import dataclass
 
 import httpx
 
+from ..chelovek.dispetcher import Kanal
 from ..config import AvitoConfig
 from ..logger import log_oshibka, logger
 
@@ -247,6 +248,64 @@ async def zapustit_nablyudenie(cfg: AvitoConfig, stop: asyncio.Event) -> None:
         uid = await api.user_id()
         logger.info("📡 Авито «%s»: поллинг наблюдения запущен", uid)
         await cikl_pollinga(api, _obrabotchik_nablyudeniya, stop)
+
+
+# ── Режим ответа через ядро (подэтап 14.2) ───────────────────────────────────
+
+def _kanal_avito(api: AvitoAPI, chat_id: str, imya: str) -> Kanal:
+    """Колбэки транспорта Авито для диспетчера. `pechataet=None` — у Авито
+    индикатора набора нет, задержки очеловечивания работают молча."""
+    async def otpravit(tekst: str) -> None:
+        await api.otpravit(chat_id, tekst)
+
+    return Kanal(otpravit=otpravit, pechataet=None, imya=imya)
+
+
+_PROSBA_TEKSTOM = ("Вложение вижу, но прочитать его не могу. Напишите, пожалуйста, "
+                   "текстом, что нужно.")
+
+
+async def zapustit(kod: str, cfg: AvitoConfig, yadro, stop: asyncio.Event, *,
+                   belyy_spisok: frozenset[str] | None = None) -> None:
+    """Поллер в режиме ответа: входящее уходит в ядро, ответ шлётся в Авито.
+
+    `belyy_spisok` — множество `chat_id`, которым РАЗРЕШЕНО отвечать. `None`
+    означало бы «отвечать всем», но на живом аккаунте это столкнётся с Jivo
+    (см. модульный докстринг), поэтому боевой режим включается отдельно (14.5),
+    а на 14.2 список всегда задан и узок (тестовый чат).
+    """
+    async with AvitoAPI(cfg) as api:
+        uid = await api.user_id()
+        logger.info("📡 Авито «%s» (%s): ответы через ядро, белый список: %s",
+                    kod, uid, ", ".join(sorted(belyy_spisok)) if belyy_spisok else "ВСЕ")
+        await cikl_pollinga(api, sdelat_obrabotchik(kod, api, yadro, belyy_spisok), stop)
+
+
+def sdelat_obrabotchik(kod: str, api: AvitoAPI, yadro,
+                       belyy_spisok: frozenset[str] | None):
+    """Обработчик входящего в режиме ответа: белый список → вложение → ядро.
+
+    Вынесен из `zapustit`, чтобы фильтр белого списка и передачу объявления
+    можно было проверить без сети (на фейковых api/yadro).
+    """
+    async def obrabotchik(v: Vhodyashchee) -> None:
+        if belyy_spisok is not None and v.chat_id not in belyy_spisok:
+            logger.info("🔇 Авито «%s»: чат %s не в белом списке — пропускаю",
+                        kod, v.chat_id)
+            return
+        imya = f"avito:{v.author_id}" if v.author_id else f"avito:{v.chat_id}"
+        if v.tekst is None:
+            # Вложение без текста: отвечаем короткой просьбой напрямую, ядру
+            # передавать нечего (то же, что делает адаптер Telegram).
+            await api.otpravit(v.chat_id, _PROSBA_TEKSTOM)
+            logger.info("👤 Авито «%s»: вложение без текста в чате %s — попросил текстом",
+                        kod, v.chat_id)
+            return
+        # Объявление кладём ДО обработки: ядро подмешает его в промпт по ключу.
+        yadro.zapomnit_obyavlenie(kod, v.chat_id, v.obyavlenie)
+        yadro.obrabotat(kod, v.chat_id, v.tekst, _kanal_avito(api, v.chat_id, imya))
+
+    return obrabotchik
 
 
 # ── Смоук вручную ────────────────────────────────────────────────────────────

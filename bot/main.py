@@ -55,6 +55,29 @@ def _kanal_telegram(kod: str, token: str, yadro: Yadro):
     return zapustit
 
 
+def zhivye_avito(cfg: Config) -> list[str]:
+    """Аккаунты Авито с заполненными кредами. Пустые креды = аккаунт не поднят."""
+    return [k for k, a in cfg.avito.items() if a.zapolnen]
+
+
+def _kanal_avito(kod: str, cfg: Config, yadro: Yadro, stop: asyncio.Event):
+    """Фабрика запуска поллера Авито по режиму `AVITO_REZHIM`.
+
+    off сюда не доходит (отфильтрован раньше). nablyudenie — только лог,
+    spisok — отвечаем чатам из белого списка, vse — отвечаем всем (боевой,
+    14.5). Белый список общий на все аккаунты; на 14.2 в нём тестовый чат.
+    """
+    async def zapustit() -> None:
+        from .channels import avito
+        acc = cfg.avito[kod]
+        if cfg.avito_rezhim == "nablyudenie":
+            await avito.zapustit_nablyudenie(acc, stop)
+            return
+        spisok = None if cfg.avito_rezhim == "vse" else frozenset(cfg.avito_belyy_spisok)
+        await avito.zapustit(kod, acc, yadro, stop, belyy_spisok=spisok)
+    return zapustit
+
+
 async def _puls(stop: asyncio.Event) -> None:
     """Пока каналов нет, процесс всё равно должен жить: под ним проверяется
     автоперезагрузка при правке кода и держатся соединения."""
@@ -103,14 +126,26 @@ async def main() -> None:
         if not zhivye:
             logger.info("📡 Токенов Telegram в .env нет — каналы не поднимаются")
 
+        # Аккаунты Авито (этап 14). off = не поднимаем; иначе поллер по каждому
+        # аккаунту с заполненными кредами. Промпты/каталог готовим для ОБЪЕДИНЕНИЯ
+        # телеграм- и авито-аккаунтов: у авито-аккаунта без TG-токена иначе не было
+        # бы промпта.
+        avito_kody = zhivye_avito(cfg) if cfg.avito_rezhim != "off" else []
+        if avito_kody:
+            logger.info("📡 Авито (%s): %s", cfg.avito_rezhim, ", ".join(avito_kody))
+
+        gotovit = sorted(set(zhivye) | set(avito_kody))
         fabrika_sessiy = db.sozdat_fabriku_sessiy(engine)
         yadro = sozdat_yadro(cfg, redis_client)
-        await yadro.podgotovit(zhivye, fabrika_sessiy)
+        await yadro.podgotovit(gotovit, fabrika_sessiy)
 
         _ustanovit_signaly(stop)
         tasks = [asyncio.create_task(
             _supervise(kod, _kanal_telegram(kod, cfg.telegram_tokeny[kod], yadro)), name=kod)
             for kod in zhivye]
+        tasks += [asyncio.create_task(
+            _supervise(f"avito-{kod}", _kanal_avito(kod, cfg, yadro, stop)), name=f"avito-{kod}")
+            for kod in avito_kody]
 
         # Живой каталог из Google-таблицы (этап 16): фоновый синк в БД раз в
         # ~10 минут. Поднимаем только когда синк включён (задан ключ) и товарный

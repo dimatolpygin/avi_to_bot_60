@@ -124,6 +124,12 @@ class Config:
     # Боевые аккаунты Авито (этап 14): код аккаунта → OAuth-приложение. Дефолт
     # пустой, чтобы обкаточные конструкторы Config (тесты) не требовали кред.
     avito: dict[str, "AvitoConfig"] = field(default_factory=dict)
+    # Режим поллеров Авито: off (не поднимать) | nablyudenie (только лог) |
+    # spisok (отвечать чатам из белого списка) | vse (отвечать всем — боевой,
+    # 14.5, после развода с Jivo). Дефолт off: без явного включения на живой
+    # аккаунт не лезем. `avito_belyy_spisok` — chat_id, которым можно отвечать.
+    avito_rezhim: str = "off"
+    avito_belyy_spisok: tuple[str, ...] = ()
 
     @property
     def debug_logi(self) -> bool:
@@ -167,6 +173,10 @@ def load_config() -> Config:
             "sbsauna": _avito("SBSAUNA"),
             "sbsauna_deshman": _avito("DESHMAN"),
         },
+        avito_rezhim=(os.environ.get("AVITO_REZHIM") or "off").strip().lower(),
+        avito_belyy_spisok=tuple(
+            c.strip() for c in (os.environ.get("AVITO_BELYY_SPISOK") or "").split(",")
+            if c.strip()),
     )
 
 
