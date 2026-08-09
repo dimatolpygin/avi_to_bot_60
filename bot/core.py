@@ -165,6 +165,12 @@ class Yadro:
                                prof.kod, e)
         return prof.prompt or ""
 
+    @property
+    def fabrika_sessiy(self):
+        """Фабрика async-сессий БД (задана в `podgotovit`). Нужна адаптеру Авито
+        для журнала диалога (этап 14.7); None, если процесс поднят без Postgres."""
+        return self._fabrika_sessiy
+
     # ── Работа ───────────────────────────────────────────────────────────────
 
     def dispetcher(self, kod: str) -> Dispetcher:

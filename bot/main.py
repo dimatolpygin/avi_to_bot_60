@@ -74,6 +74,10 @@ def _kanal_avito(kod: str, cfg: Config, yadro: Yadro, stop: asyncio.Event):
             await avito.zapustit_nablyudenie(acc, stop)
             return
         spisok = None if cfg.avito_rezhim == "vse" else frozenset(cfg.avito_belyy_spisok)
+        # Журнал ленты диалога в БД (14.7): пишем клиента и бота в `messages` для
+        # панели-виджета. Не зависит от amoCRM и включён всегда, когда есть БД.
+        from .zhurnal import Zhurnal
+        zhurnal = Zhurnal(yadro.fabrika_sessiy, kod, "avito") if yadro.fabrika_sessiy else None
         # Зеркало в amoCRM (14.3): поднимаем только когда включено И есть креды
         # канала. Клиент amojo живёт ровно столько же, сколько поллер аккаунта.
         if cfg.amo_zerkalo == "on" and cfg.amojo is not None:
@@ -84,9 +88,10 @@ def _kanal_avito(kod: str, cfg: Config, yadro: Yadro, stop: asyncio.Event):
                             bot_ref_id=cfg.amo_bot_ref_id or None)
                 logger.info("🪞 Авито «%s»: диалог зеркалируется в amoCRM%s", kod,
                             "" if cfg.amo_bot_ref_id else " (входящие; реплики бота — с 14.4)")
-                await avito.zapustit(kod, acc, yadro, stop, belyy_spisok=spisok, zerkalo=z)
+                await avito.zapustit(kod, acc, yadro, stop, belyy_spisok=spisok,
+                                     zerkalo=z, zhurnal=zhurnal)
             return
-        await avito.zapustit(kod, acc, yadro, stop, belyy_spisok=spisok)
+        await avito.zapustit(kod, acc, yadro, stop, belyy_spisok=spisok, zhurnal=zhurnal)
     return zapustit
 
 

@@ -253,17 +253,20 @@ async def zapustit_nablyudenie(cfg: AvitoConfig, stop: asyncio.Event) -> None:
 # ── Режим ответа через ядро (подэтап 14.2) ───────────────────────────────────
 
 def _kanal_avito(api: AvitoAPI, chat_id: str, imya: str, *,
-                 zerkalo=None, avtor_id=None) -> Kanal:
+                 zerkalo=None, avtor_id=None, zhurnal=None) -> Kanal:
     """Колбэки транспорта Авито для диспетчера. `pechataet=None` — у Авито
     индикатора набора нет, задержки очеловечивания работают молча.
 
     Если задано `zerkalo` (14.3), каждая отправленная реплика дублируется
     исходящим в amoCRM — так менеджер видит и ответы бота, а не только клиента.
+    `zhurnal` (14.7) — та же реплика пишется в нашу БД для панели-виджета.
     """
     async def otpravit(tekst: str) -> None:
         await api.otpravit(chat_id, tekst)
         if zerkalo is not None:
             await zerkalo.ishodyashchee(chat_id, tekst, avtor_id=avtor_id)
+        if zhurnal is not None:
+            await zhurnal.ishodyashchee(chat_id, tekst)
 
     return Kanal(otpravit=otpravit, pechataet=None, imya=imya)
 
@@ -273,7 +276,8 @@ _PROSBA_TEKSTOM = ("Вложение вижу, но прочитать его н
 
 
 async def zapustit(kod: str, cfg: AvitoConfig, yadro, stop: asyncio.Event, *,
-                   belyy_spisok: frozenset[str] | None = None, zerkalo=None) -> None:
+                   belyy_spisok: frozenset[str] | None = None, zerkalo=None,
+                   zhurnal=None) -> None:
     """Поллер в режиме ответа: входящее уходит в ядро, ответ шлётся в Авито.
 
     `belyy_spisok` — множество `chat_id`, которым РАЗРЕШЕНО отвечать. `None`
@@ -282,27 +286,31 @@ async def zapustit(kod: str, cfg: AvitoConfig, yadro, stop: asyncio.Event, *,
     а на 14.2 список всегда задан и узок (тестовый чат).
 
     `zerkalo` (14.3) — если задано, диалог дублируется в amoCRM (обе стороны).
+    `zhurnal` (14.7) — если задано, лента (клиент+бот) пишется в нашу БД для панели.
     """
     async with AvitoAPI(cfg) as api:
         uid = await api.user_id()
-        logger.info("📡 Авито «%s» (%s): ответы через ядро, белый список: %s%s",
+        logger.info("📡 Авито «%s» (%s): ответы через ядро, белый список: %s%s%s",
                     kod, uid, ", ".join(sorted(belyy_spisok)) if belyy_spisok else "ВСЕ",
-                    ", зеркало в amoCRM" if zerkalo is not None else "")
+                    ", зеркало в amoCRM" if zerkalo is not None else "",
+                    ", журнал в БД" if zhurnal is not None else "")
         await cikl_pollinga(
-            api, sdelat_obrabotchik(kod, api, yadro, belyy_spisok, zerkalo=zerkalo), stop)
+            api, sdelat_obrabotchik(kod, api, yadro, belyy_spisok,
+                                    zerkalo=zerkalo, zhurnal=zhurnal), stop)
 
 
 def sdelat_obrabotchik(kod: str, api: AvitoAPI, yadro,
-                       belyy_spisok: frozenset[str] | None, *, zerkalo=None):
+                       belyy_spisok: frozenset[str] | None, *, zerkalo=None,
+                       zhurnal=None):
     """Обработчик входящего в режиме ответа: белый список → вложение → ядро.
 
-    Вынесен из `zapustit`, чтобы фильтр белого списка, передачу объявления и
-    зеркало в amoCRM можно было проверить без сети (на фейковых api/yadro).
+    Вынесен из `zapustit`, чтобы фильтр белого списка, передачу объявления,
+    зеркало в amoCRM и журнал в БД можно было проверить без сети (на фейках).
 
     Порядок для текста: сперва зеркалим входящее в amoCRM (менеджер видит вопрос
-    клиента даже если бот замолчит), потом отдаём ядру; исходящие бота зеркалит
-    обёртка `_kanal_avito`. Вложение (текста нет) в amoCRM пока не зеркалим —
-    просьба ответить текстом уходит клиенту напрямую, минуя ядро.
+    клиента даже если бот замолчит) и пишем в журнал, потом отдаём ядру; исходящие
+    бота зеркалит и журналит обёртка `_kanal_avito`. Вложение (текста нет) в amoCRM
+    пока не зеркалим, но в журнал кладём просьбу текстом — это ответ клиенту.
     """
     async def obrabotchik(v: Vhodyashchee) -> None:
         if belyy_spisok is not None and v.chat_id not in belyy_spisok:
@@ -314,16 +322,21 @@ def sdelat_obrabotchik(kod: str, api: AvitoAPI, yadro,
             # Вложение без текста: отвечаем короткой просьбой напрямую, ядру
             # передавать нечего (то же, что делает адаптер Telegram).
             await api.otpravit(v.chat_id, _PROSBA_TEKSTOM)
+            if zhurnal is not None:
+                await zhurnal.ishodyashchee(v.chat_id, _PROSBA_TEKSTOM)
             logger.info("👤 Авито «%s»: вложение без текста в чате %s — попросил текстом",
                         kod, v.chat_id)
             return
         if zerkalo is not None:
             await zerkalo.vhodyashchee(v.chat_id, v.msg_id, v.author_id, v.tekst)
+        if zhurnal is not None:
+            await zhurnal.vhodyashchee(v.chat_id, v.tekst, imya=imya)
         # Объявление кладём ДО обработки: ядро подмешает его в промпт по ключу.
         yadro.zapomnit_obyavlenie(kod, v.chat_id, v.obyavlenie)
         yadro.obrabotat(kod, v.chat_id, v.tekst,
                         _kanal_avito(api, v.chat_id, imya,
-                                     zerkalo=zerkalo, avtor_id=v.author_id))
+                                     zerkalo=zerkalo, avtor_id=v.author_id,
+                                     zhurnal=zhurnal))
 
     return obrabotchik
 
