@@ -39,7 +39,10 @@ jobs:
           script: |
             set -e
             cd /opt/sbavito
-            git pull --ff-only
+            # reset --hard (а не pull): переживает non-ff и любые локальные правки
+            # рабочего дерева. .env/материалы/secrets/доступы — в .gitignore, их не трогает.
+            git fetch origin master
+            git reset --hard origin/master
             docker compose -f docker-compose.prod.yml up -d --build
             # Миграции гонит entrypoint при старте; дублируем на случай, если
             # контейнер уже был поднят и entrypoint не перезапускался.
