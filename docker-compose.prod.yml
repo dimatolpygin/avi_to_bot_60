@@ -1,0 +1,89 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# PROD-компоновка для сервера (этап 14.5, шаг 1: поллинг на боевом сервере).
+#
+# Отличия от dev (docker-compose.yml):
+#   • САМОДОСТАТОЧНА: поднимает свои postgres16 и redis. На dev-хосте БД и Redis —
+#     ЧУЖИЕ существующие контейнеры (их трогать нельзя), а сервер 45.88.14.140
+#     наш и пустой — поэтому здесь и app, и БД, и кеш в одном compose, один
+#     `up` поднимает всё.
+#   • БЕЗ watchmedo и БЕЗ монтирования кода: код взят из образа (Dockerfile его
+#     печёт), а не с диска. Правка кода на бою = пересборка образа и redeploy,
+#     а не тихий hot-reload. Так «что задеплоено» = «что в образе», без сюрпризов.
+#   • restart: unless-stopped на всех сервисах — переживает перезагрузку сервера.
+#
+# Запуск на сервере:
+#   docker compose -f docker-compose.prod.yml up -d --build
+# Подробности и порядок шагов — docs/DEPLOY.md.
+#
+# ⚠️ Шаг 1 работает НА ПОЛЛИНГЕ и НЕ открывает наружу ни одного порта: ни вебхука,
+# ни nginx, ни публичного HTTPS тут нет (это шаг 2, вместе с разводкой Jivo).
+# ─────────────────────────────────────────────────────────────────────────────
+name: sbavito
+
+services:
+  postgres:
+    image: postgres:16
+    container_name: sbavito-postgres
+    environment:
+      POSTGRES_DB: ${PGDATABASE:-sbavito}
+      POSTGRES_USER: ${PGUSER:-postgres}
+      # Пароль ОБЯЗАТЕЛЕН и берётся из .env; пустой не пропускаем.
+      POSTGRES_PASSWORD: ${PGPASSWORD:?PGPASSWORD не задан в .env}
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    healthcheck:
+      # app стартует только когда БД реально принимает соединения: entrypoint
+      # первым делом гонит alembic upgrade, а он без живой БД падает.
+      test: ["CMD-SHELL", "pg_isready -U ${PGUSER:-postgres} -d ${PGDATABASE:-sbavito}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    container_name: sbavito-redis
+    # appendonly: память диалога/дебаунс/round-robin переживают рестарт контейнера.
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  app:
+    build: .
+    image: sbavito-app:latest
+    container_name: sbavito-app
+    env_file: .env
+    environment:
+      # В .env адреса локальные — на бою БД и Redis это соседние сервисы compose,
+      # адресуемся по именам сервисов (сеть compose их резолвит).
+      PGHOST: postgres
+      PGPORT: "5432"
+      REDIS_URL: redis://redis:6379/3
+    volumes:
+      # Словари поиска: трекаются в git (приезжают с клоном), но в образ не печутся —
+      # монтируем только чтение. Правка словаря = git pull, без пересборки.
+      - ./data:/app/data:ro
+      # Прайс для ETL: папка вне git, копируется на сервер отдельно (scp). Нужна
+      # только для разового `import_prays`; в рантайме каталог берётся из БД.
+      - ./материалы:/app/материалы:ro
+      # Служебный ключ Google для живого синка (этап 16). Вне git, копируется scp.
+      # Нет ключа/переменной GOOGLE_CREDS_PUT — синк просто выключен, контейнер жив.
+      - ./secrets:/app/secrets:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    # entrypoint сам гонит `alembic upgrade head`, затем CMD `python -m bot.main`.
+    # Никакого watchmedo — прод-процесс, не dev-автоперезагрузка.
+    restart: unless-stopped
+
+volumes:
+  pg_data:
+  redis_data:
