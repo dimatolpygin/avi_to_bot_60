@@ -185,6 +185,12 @@ class Config:
     # REST API amoCRM (14.4): сделки/задачи. Дефолт «пусто» → отправка выключена,
     # лид всё равно ложится в БД (ретрай по status=failed).
     amo_rest: "AmoRestConfig | None" = None
+    # HTTP-API панели-виджета (14.7, кирпич 2): отдаёт ленту диалога из Postgres.
+    # Токен пуст → API не поднимается (штатный выключатель). Origin — для CORS
+    # виджета в браузере amoCRM; по умолчанию любой (за токеном и так закрыто).
+    panel_api_token: str = ""
+    panel_api_port: int = 8080
+    panel_cors_origin: str = "*"
 
     @property
     def debug_logi(self) -> bool:
@@ -236,6 +242,9 @@ def load_config() -> Config:
         amo_zerkalo=(os.environ.get("AMO_ZERKALO") or "off").strip().lower(),
         amo_bot_ref_id=(os.environ.get("AMO_BOT_REF_ID") or "").strip(),
         amo_rest=_amo_rest(),
+        panel_api_token=(os.environ.get("PANEL_API_TOKEN") or "").strip(),
+        panel_api_port=_int("PANEL_API_PORT", 8080),
+        panel_cors_origin=(os.environ.get("PANEL_CORS_ORIGIN") or "*").strip(),
     )
 
 

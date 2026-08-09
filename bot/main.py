@@ -192,6 +192,18 @@ async def main() -> None:
                 name="доотправка-лидов"))
             logger.info("📇 amoCRM REST подключён: лиды уходят в сделки, доотправка при старте")
 
+        # HTTP-API панели-виджета (этап 14.7, кирпич 2): отдаёт ленту диалога из
+        # Postgres виджету amoCRM. Поднимаем только когда задан токен доступа —
+        # иначе API наружу не выставляем. Под супервизором: падение веб-сервера
+        # не должно ронять ботов и наоборот.
+        if cfg.panel_api_token:
+            from .panel import api as panel_api
+            tasks.append(asyncio.create_task(
+                _supervise("панель-API", lambda: panel_api.zapustit(
+                    fabrika_sessiy, cfg.panel_api_token, port=cfg.panel_api_port,
+                    origin=cfg.panel_cors_origin, stop=stop)),
+                name="панель-API"))
+
         if not tasks:
             tasks.append(asyncio.create_task(_puls(stop), name="пульс"))
 
