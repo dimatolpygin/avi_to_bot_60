@@ -1,0 +1,23 @@
+{
+  "widget": {
+    "name": "SBAvito — bot conversations",
+    "description": "Conversation feed of SB Group AI bots (Avito) with customers: chat list and full transcript. Data comes from the SBAvito backend.",
+    "short_description": "Avito AI bot conversations"
+  },
+  "left_menu": {
+    "title": "SBAvito"
+  },
+  "settings": {
+    "api_base": "API address (e.g. https://bot-admin.online)",
+    "api_token": "API access token"
+  },
+  "panel": {
+    "loading": "Loading…",
+    "empty": "No dialogs yet",
+    "error": "Failed to load. Check the API address and token in the widget settings.",
+    "back": "← Back to chats",
+    "no_settings": "Fill in the API address and token in the widget settings.",
+    "client": "Client",
+    "bot": "Bot"
+  }
+}

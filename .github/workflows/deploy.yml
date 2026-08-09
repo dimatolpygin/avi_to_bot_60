@@ -1,0 +1,47 @@
+name: CI/CD
+
+# Тесты — на любой push и PR. Деплой на боевой сервер — ТОЛЬКО с master
+# (правило проекта «Actions — только master»). Секреты деплоя — в Settings →
+# Secrets репозитория, см. docs/CICD.md. Ни одного секрета в этом файле.
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    name: Тесты (pytest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      # Тестам не нужны Postgres/Redis: ИИ-слой, поиск, панель и журнал гоняются
+      # на фейковых сессиях/подменённом клиенте (см. tests/). Ставим пакет с dev.
+      - run: pip install -e ".[dev]"
+      - run: pytest -q
+
+  deploy:
+    name: Деплой на сервер
+    needs: test
+    if: github.ref == 'refs/heads/master'
+    runs-on: ubuntu-latest
+    steps:
+      - name: SSH → git pull + пересборка стека
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          port: ${{ secrets.DEPLOY_PORT }}
+          script: |
+            set -e
+            cd /opt/sbavito
+            git pull --ff-only
+            docker compose -f docker-compose.prod.yml up -d --build
+            # Миграции гонит entrypoint при старте; дублируем на случай, если
+            # контейнер уже был поднят и entrypoint не перезапускался.
+            docker compose -f docker-compose.prod.yml exec -T app alembic upgrade head
+            docker compose -f docker-compose.prod.yml ps

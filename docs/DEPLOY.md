@@ -112,6 +112,44 @@ cd /opt/sbavito && docker compose -f docker-compose.prod.yml down   # стоп (
 
 ---
 
+## Панель-API (этап 14.7, кирпич 2) и nginx `/api`
+
+HTTP-API отдаёт ленту диалога виджету amoCRM (`GET /api/chats`,
+`GET /api/dialog/{id}`), читает из Postgres (журнал кирпича 1). Поднимается в том
+же процессе `app` фоновой задачей — **только если задан `PANEL_API_TOKEN`**.
+
+`.env` на сервере:
+```
+PANEL_API_TOKEN=<длинный секрет, сгенерировать: openssl rand -hex 32>
+PANEL_API_PORT=8080
+PANEL_CORS_ORIGIN=https://sbcompany.amocrm.ru   # домен amoCRM (для CORS виджета)
+```
+Порт наружу НЕ публикуем (в compose нет `ports:` у app) — доступ только через
+nginx по HTTPS. Проброс к контейнеру внутри docker-сети по имени `app:8080`;
+чтобы nginx с хоста видел контейнер, добавь `app` в ту же сеть или опубликуй порт
+на loopback (`127.0.0.1:8080:8080`). Блок nginx:
+```nginx
+location /api/ {
+    proxy_pass http://127.0.0.1:8080;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+}
+```
+Проверка: `curl https://bot-admin.online/api/health` → `{"ok": true}`;
+`curl -H "Authorization: Bearer $PANEL_API_TOKEN" https://bot-admin.online/api/chats`.
+Токен пуст → API молчит (в логе «Панель-API: токен не задан — не поднимаю»).
+
+---
+
+## CI/CD (репо github.com/dimatolpygin/sb_group)
+
+Пайплайн — `.github/workflows/deploy.yml`: на любой push гоняет `pytest` в образе;
+на push в `master` дополнительно деплоит на сервер по SSH. Что нужно один раз
+настроить в репо (Settings → Secrets and variables → Actions) — см. `docs/CICD.md`.
+⚠️ Деплой-джоб срабатывает только на `master` (правило «Actions — только master»).
+
+---
+
 ## Шаг 2 — вебхук + «отвечаем всем» (эскиз, ещё не делалось)
 1. DNS `bot-admin.online` → 45.88.14.140; nginx + certbot (TLS), проксирует на
    контейнер (нужно добавить в приложение HTTP-приёмник вебхука Авито).
