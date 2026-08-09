@@ -36,10 +36,17 @@ from .znaniya import prompt_iz_bd
 class Yadro:
     """Один экземпляр на процесс: каталоги, память и диспетчеры всех аккаунтов."""
 
-    def __init__(self, cfg: Config, pamyat: Pamyat, *, tempo: Tempo | None = None) -> None:
+    def __init__(self, cfg: Config, pamyat: Pamyat, *, tempo: Tempo | None = None,
+                 redis=None) -> None:
         self.cfg = cfg
         self.pamyat = pamyat
         self.tempo = tempo or Tempo()
+        # Сырой Redis для раздачи лидов 50/50 (round-robin, этап 14.4). Может быть
+        # None (тесты/без кеша) — тогда отправка берёт первого менеджера.
+        self._redis = redis
+        # Фоновые задачи (отправка лида в amoCRM): держим ссылки, чтобы их не
+        # собрал GC, и снимаем по завершении. Отправка не должна тормозить ответ.
+        self._fon: set[asyncio.Task] = set()
         # Транспорт нужен только затем, чтобы лид знал, из какого канала пришёл
         # клиент: на этапе 14 здесь станет «avito», и менеджер в amo увидит разницу.
         self.kanal_transporta = "telegram"
@@ -211,15 +218,27 @@ class Yadro:
         """Куда уходит контакт, который клиент оставил сам.
 
         Чат достаём из ключа диалога (`аккаунт:чат`): по нему менеджер найдёт
-        переписку, а этап 12 — сделку в amoCRM.
+        переписку. Сначала лид ложится в БД (не теряем контакт), затем в ФОНЕ
+        уходит в amoCRM (сделка+задача, этап 14.4) — фон, чтобы ответ клиенту
+        не ждал трёх запросов в CRM.
         """
         _, _, chat = klyuch.partition(":")
 
         async def peredat(telefon: str, imya: str | None, vyzhimka: str) -> None:
-            await sohranit_lead(self._fabrika_sessiy, DannyeLida(
+            lead_id = await sohranit_lead(self._fabrika_sessiy, DannyeLida(
                 kod_akkaunta=kod, chat=chat, kanal=self.kanal_transporta,
                 telefon=telefon, imya=imya, vyzhimka=vyzhimka))
+            if lead_id and self.cfg.amo_rest is not None:
+                from .crm.amo import otpravit_lead_po_id
+                self._v_fone(otpravit_lead_po_id(
+                    self.cfg.amo_rest, self._redis, self._fabrika_sessiy, lead_id))
         return peredat
+
+    def _v_fone(self, coro) -> None:
+        """Запустить корутину в фоне, удержав ссылку и сняв её по завершении."""
+        t = asyncio.ensure_future(coro)
+        self._fon.add(t)
+        t.add_done_callback(self._fon.discard)
 
     def obrabotat(self, kod: str, chat: str | int, tekst: str, kanal: Kanal) -> asyncio.Task:
         """Входящее сообщение клиента. Возвращает задачу ответа (нужна тестам)."""
@@ -243,6 +262,10 @@ class Yadro:
     async def ostanovit(self) -> None:
         for d in self._dispetchery.values():
             await d.ostanovit()
+        # Даём фоновой отправке лидов доработать, пока соединения ещё открыты
+        # (лид уже в БД; при обрыве подхватит otpravit_nedoslannye при старте).
+        if self._fon:
+            await asyncio.gather(*self._fon, return_exceptions=True)
 
 
 def _fakt_obyavleniya(o: dict) -> str:
@@ -283,4 +306,4 @@ def _data_praysa() -> str:
 
 
 def sozdat_yadro(cfg: Config, redis_client, *, tempo: Tempo | None = None) -> Yadro:
-    return Yadro(cfg, PamyatRedis(redis_client), tempo=tempo)
+    return Yadro(cfg, PamyatRedis(redis_client), tempo=tempo, redis=redis_client)

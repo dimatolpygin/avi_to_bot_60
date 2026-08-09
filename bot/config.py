@@ -139,6 +139,22 @@ class AmojoConfig:
 
 
 @dataclass(frozen=True)
+class AmoRestConfig:
+    """Доступ к REST API amoCRM v4 (этап 14.4): сделки, задачи, пользователи.
+
+    Долгосрочный токен интеграции — полный доступ к CRM, живёт только в .env.
+    Пусто → отправка лидов в amoCRM выключена (лид всё равно ложится в БД).
+    """
+
+    base_url: str
+    access_token: str
+
+    @property
+    def zapolnen(self) -> bool:
+        return bool(self.base_url.strip() and self.access_token.strip())
+
+
+@dataclass(frozen=True)
 class Config:
     pg: PgConfig
     redis_url: str
@@ -166,6 +182,9 @@ class Config:
     # исходящие в CRM. Пусто → исходящие не зеркалим (входящие клиента — да).
     # Появится в 14.4 с OAuth-токеном amoCRM (оттуда берётся ref_id менеджера).
     amo_bot_ref_id: str = ""
+    # REST API amoCRM (14.4): сделки/задачи. Дефолт «пусто» → отправка выключена,
+    # лид всё равно ложится в БД (ретрай по status=failed).
+    amo_rest: "AmoRestConfig | None" = None
 
     @property
     def debug_logi(self) -> bool:
@@ -216,7 +235,17 @@ def load_config() -> Config:
         amojo=_amojo(),
         amo_zerkalo=(os.environ.get("AMO_ZERKALO") or "off").strip().lower(),
         amo_bot_ref_id=(os.environ.get("AMO_BOT_REF_ID") or "").strip(),
+        amo_rest=_amo_rest(),
     )
+
+
+def _amo_rest() -> "AmoRestConfig | None":
+    """Собрать доступ к REST API amoCRM из .env. Незаполнено → None (отправка off)."""
+    cfg = AmoRestConfig(
+        base_url=(os.environ.get("AMO_BASE") or "").strip().rstrip("/"),
+        access_token=(os.environ.get("AMO_ACCESS_TOKEN") or "").strip(),
+    )
+    return cfg if cfg.zapolnen else None
 
 
 def _amojo() -> "AmojoConfig | None":

@@ -177,6 +177,16 @@ async def main() -> None:
         elif cfg.google.vklyuchena:
             logger.info("🔄 Синк каталога включён, но бот saunamart не поднят — синк не запускаю")
 
+        # Доотправка лидов, зависших с прошлого запуска (этап 14.4): amoCRM лежал —
+        # строки в `leads` со status new/failed; при старте пробуем снова. Разовая
+        # задача, не под супервизором: отработала — завершилась.
+        if cfg.amo_rest is not None:
+            from .crm.amo import otpravit_nedoslannye
+            tasks.append(asyncio.create_task(
+                otpravit_nedoslannye(cfg.amo_rest, redis_client, fabrika_sessiy),
+                name="доотправка-лидов"))
+            logger.info("📇 amoCRM REST подключён: лиды уходят в сделки, доотправка при старте")
+
         if not tasks:
             tasks.append(asyncio.create_task(_puls(stop), name="пульс"))
 
