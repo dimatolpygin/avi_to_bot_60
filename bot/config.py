@@ -112,6 +112,33 @@ class AvitoConfig:
 
 
 @dataclass(frozen=True)
+class AmojoConfig:
+    """Зарегистрированный канал amoCRM Chat API (amojo) — этап 14, подэтап 14.3.
+
+    `channel_id`/`channel_secret` выданы поддержкой при регистрации канала;
+    `amojo_id` — id аккаунта amoCRM в amojo (он же `account_id` в connect).
+    `scope_id` = `channel_id + "_" + amojo_id` — детерминирован, в путь отправки
+    сообщений идёт именно он. Секрет — только для HMAC-подписи, в путях/телах
+    не светится. Незаполненные креды = зеркало не поднимается (штатный
+    выключатель, как пустой токен).
+    """
+
+    channel_id: str
+    channel_secret: str
+    amojo_id: str
+    base_url: str = "https://amojo.amocrm.ru"
+
+    @property
+    def scope_id(self) -> str:
+        return f"{self.channel_id}_{self.amojo_id}"
+
+    @property
+    def zapolnen(self) -> bool:
+        return bool(self.channel_id.strip() and self.channel_secret.strip()
+                    and self.amojo_id.strip())
+
+
+@dataclass(frozen=True)
 class Config:
     pg: PgConfig
     redis_url: str
@@ -130,6 +157,15 @@ class Config:
     # аккаунт не лезем. `avito_belyy_spisok` — chat_id, которым можно отвечать.
     avito_rezhim: str = "off"
     avito_belyy_spisok: tuple[str, ...] = ()
+    # Зеркало диалога в amoCRM (этап 14.3). Дефолт None — канал не задан (тесты).
+    amojo: "AmojoConfig | None" = None
+    # Режим зеркала: off (не зеркалить) | on (Авито → amoCRM, одностороннее,
+    # 14.3a). Обратная сторона (ответ менеджера из amo → клиент) — 14.5.
+    amo_zerkalo: str = "off"
+    # UUID пользователя amoCRM, от чьего имени показываем реплики бота как
+    # исходящие в CRM. Пусто → исходящие не зеркалим (входящие клиента — да).
+    # Появится в 14.4 с OAuth-токеном amoCRM (оттуда берётся ref_id менеджера).
+    amo_bot_ref_id: str = ""
 
     @property
     def debug_logi(self) -> bool:
@@ -177,7 +213,21 @@ def load_config() -> Config:
         avito_belyy_spisok=tuple(
             c.strip() for c in (os.environ.get("AVITO_BELYY_SPISOK") or "").split(",")
             if c.strip()),
+        amojo=_amojo(),
+        amo_zerkalo=(os.environ.get("AMO_ZERKALO") or "off").strip().lower(),
+        amo_bot_ref_id=(os.environ.get("AMO_BOT_REF_ID") or "").strip(),
     )
+
+
+def _amojo() -> "AmojoConfig | None":
+    """Собрать креды канала amoCRM Chat API из .env. Незаполнено → None."""
+    cfg = AmojoConfig(
+        channel_id=(os.environ.get("AMO_CHAT_CHANNEL_ID") or "").strip(),
+        channel_secret=(os.environ.get("AMO_CHAT_CHANNEL_SECRET") or "").strip(),
+        amojo_id=(os.environ.get("AMOJO_ID") or "").strip(),
+        base_url=(os.environ.get("AMOJO_BASE_URL") or "https://amojo.amocrm.ru").strip(),
+    )
+    return cfg if cfg.zapolnen else None
 
 
 def _avito(suffiks: str) -> "AvitoConfig":

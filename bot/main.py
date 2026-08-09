@@ -74,6 +74,18 @@ def _kanal_avito(kod: str, cfg: Config, yadro: Yadro, stop: asyncio.Event):
             await avito.zapustit_nablyudenie(acc, stop)
             return
         spisok = None if cfg.avito_rezhim == "vse" else frozenset(cfg.avito_belyy_spisok)
+        # Зеркало в amoCRM (14.3): поднимаем только когда включено И есть креды
+        # канала. Клиент amojo живёт ровно столько же, сколько поллер аккаунта.
+        if cfg.amo_zerkalo == "on" and cfg.amojo is not None:
+            from .crm.amojo import AmojoAPI, Zerkalo
+            from .profili import profil
+            async with AmojoAPI(cfg.amojo) as amojo:
+                z = Zerkalo(amojo, kod, profil(kod).menedzher,
+                            bot_ref_id=cfg.amo_bot_ref_id or None)
+                logger.info("🪞 Авито «%s»: диалог зеркалируется в amoCRM%s", kod,
+                            "" if cfg.amo_bot_ref_id else " (входящие; реплики бота — с 14.4)")
+                await avito.zapustit(kod, acc, yadro, stop, belyy_spisok=spisok, zerkalo=z)
+            return
         await avito.zapustit(kod, acc, yadro, stop, belyy_spisok=spisok)
     return zapustit
 
