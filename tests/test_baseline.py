@@ -15,13 +15,22 @@ import shutil
 
 import pytest
 
+from bot.etl.import_prays import FAYL_PO_UMOLCHANIYU
 from bot.search import baseline
 from bot.search.katalog import iz_fayla_praysa
 from bot.search.slovari import KATALOG_DANNYH, zagruzit
 
 
+def _skip_bez_praysa() -> None:
+    """Клиентский прайс `материалы/прайс/*.csv` — вне git (публичный репо, CI).
+    Нет файла → тест на живом каталоге пропускаем, а не роняем."""
+    if not os.path.exists(FAYL_PO_UMOLCHANIYU):
+        pytest.skip("прайс материалы/прайс/*.csv вне git — тест на живом каталоге пропущен")
+
+
 @pytest.fixture(scope="module")
 def katalog():
+    _skip_bez_praysa()
     return iz_fayla_praysa()
 
 

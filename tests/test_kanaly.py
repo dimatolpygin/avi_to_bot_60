@@ -7,8 +7,18 @@
 from __future__ import annotations
 
 import json
+import os
 
 import pytest
+
+from bot.etl.import_prays import FAYL_PO_UMOLCHANIYU
+
+
+def _skip_bez_praysa() -> None:
+    """Клиентский прайс `материалы/прайс/*.csv` — вне git (публичный репо, CI).
+    Ядро с каталогом из файла тогда не собрать → тест пропускаем, а не роняем."""
+    if not os.path.exists(FAYL_PO_UMOLCHANIYU):
+        pytest.skip("прайс материалы/прайс/*.csv вне git — тест на живом каталоге пропущен")
 
 from bot import core
 from bot.ai import agent
@@ -313,6 +323,7 @@ class SborKanala:
 
 
 async def _yadro(monkeypatch, otvety: list[str]) -> tuple[Yadro, FakeChat, PamyatRedis]:
+    _skip_bez_praysa()
     fake = FakeChat(otvety)
     monkeypatch.setattr(agent, "chat", fake)
     pamyat = PamyatRedis(FakeRedis())
@@ -402,6 +413,7 @@ async def _yadro_dlya_perezagruzki() -> Yadro:
     """Ядро с каталогом из файла (podgotovit без фабрики) + фабрика сессий,
     подставленная руками: перезагрузку кормит подменённый `zagruzit_iz_bd`,
     в реальную БД не ходим."""
+    _skip_bez_praysa()
     yadro = Yadro(_cfg(), PamyatRedis(FakeRedis()), tempo=BYSTRO)
     await yadro.podgotovit(["saunamart"])
     yadro._fabrika_sessiy = _fabrika_sessiy
@@ -468,6 +480,7 @@ async def test_perezagruzka_uslug_nichego_ne_delaet(monkeypatch):
 
 async def test_perezagruzka_bez_fabriki_sessiy_ne_padaet():
     """Ядро поднято без БД (файловый каталог) — перезагрузка просто пропускается."""
+    _skip_bez_praysa()
     yadro = Yadro(_cfg(), PamyatRedis(FakeRedis()), tempo=BYSTRO)
     await yadro.podgotovit(["saunamart"])       # fabrika=None
     ok = await yadro.perezagruzit_katalog("saunamart")
