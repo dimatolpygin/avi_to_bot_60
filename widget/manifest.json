@@ -14,10 +14,9 @@
     }
   },
   "locale": ["ru", "en"],
-  "left_menu": {
-    "list": {
-      "title": "left_menu.title"
-    }
+  "locations": ["settings", "advanced_settings"],
+  "advanced": {
+    "title": "left_menu.title"
   },
   "settings": {
     "api_base": {

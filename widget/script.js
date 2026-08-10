@@ -42,8 +42,11 @@ define(['jquery'], function ($) {
     }
 
     function $area() {
-      // Рабочая область левого меню виджета.
-      return $('#work-area-' + self.get_settings().widget_code + ', .widget-work-area')
+      // Рабочая область страницы advanced_settings. amoCRM даёт контейнер
+      // #work-area-<widget_code>; widget_code лежит в self.params, не в настройках.
+      var code = (self.params && self.params.widget_code)
+        || (self.get_settings() && self.get_settings().widget_code) || '';
+      return $('#work-area-' + code + ', .widget_settings_block__container, .widget-work-area')
         .first();
     }
 
