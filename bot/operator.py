@@ -102,6 +102,23 @@ class Operatory:
         except Exception as e:  # noqa: BLE001
             log_oshibka(f"Оператор: не записал id реплики {klyuch}: {e}")
 
+    async def aktiven(self, kod, chat) -> bool:
+        """Говорил ли бот в этом чате под 14.8 (журнал непустой).
+
+        Пусто = холодный старт: детектор перехвата ещё не имеет базы. Последнее
+        исходящее в таком чате могло быть репликой САМОГО бота ДО включения 14.8
+        (в журнал она не попала), и глушить по нему нельзя — иначе на деплое бот
+        замолкает во всех живых чатах разом. Сбой кеша — считаем активным (не
+        зависаем в вечном базлайне; ложного глушения не даёт `bot_otpravlyal`)."""
+        klyuch = self._kl_bot(kod, chat)
+        if self._redis is None:
+            return bool(self._otpravleno.get(klyuch))
+        try:
+            return bool(await self._redis.llen(klyuch))
+        except Exception as e:  # noqa: BLE001
+            log_oshibka(f"Оператор: не прочитал длину журнала {klyuch}: {e}")
+            return True
+
     async def bot_otpravlyal(self, kod, chat, msg_id) -> bool:
         """Отправлял ли бот сообщение с этим id (иначе последнее исходящее —
         менеджера). Пустой id — не бот; сбой кеша — считаем «бот», чтобы не

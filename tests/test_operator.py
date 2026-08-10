@@ -51,6 +51,9 @@ class FakeRedis:
         sp = self.lists.get(k, [])
         return sp[a:] if b == -1 else sp[a:b + 1]
 
+    async def llen(self, k):
+        self._p(); return len(self.lists.get(k, []))
+
 
 class _FakeYadro:
     def __init__(self):
@@ -168,15 +171,52 @@ async def test_pod_operatorom_bot_molchit():
 
 
 async def test_chuzhoe_ishodyashchee_stavit_flag_i_glushit():
-    """В чате последнее исходящее — не бот (ответил менеджер): ставим флаг,
-    бот в этом сообщении молчит."""
+    """Бот в чате уже говорил (журнал непуст), а последнее исходящее — не его
+    (ответил менеджер): ставим флаг, бот в этом сообщении молчит."""
     op = Operatory(FakeRedis())
+    await op.zapomnit_otpravlennoe("saunamart", "c1", "bot-old")   # бот тут говорил
     api = _FakeAPI(soobshcheniya=[{"id": "mgr-1", "direction": "out", "created": 100}])
     ya = _FakeYadro()
     obr = sdelat_obrabotchik("saunamart", api, ya, None, operatory=op)
 
     await obr(_vhod(chat_id="c1", text="а доставка?"))
 
+    assert ya.obrabotano == []
+    assert await op.vedet("saunamart", "c1") is True
+
+
+async def test_holodny_start_ne_glushit_a_bazlainit():
+    """Журнал пуст (бот тут ещё не говорил под 14.8): чужое-на-вид исходящее —
+    это могла быть реплика самого бота ДО 14.8. Не глушим, а запоминаем её как
+    базлайн; бот отвечает на входящее."""
+    op = Operatory(FakeRedis())
+    api = _FakeAPI(soobshcheniya=[{"id": "staraya", "direction": "out", "created": 100}])
+    ya = _FakeYadro()
+    obr = sdelat_obrabotchik("saunamart", api, ya, None, operatory=op)
+
+    await obr(_vhod(chat_id="c1", text="почём липа"))
+
+    assert ya.obrabotano == [("saunamart", "c1", "почём липа")]     # бот ответил
+    assert await op.vedet("saunamart", "c1") is False              # не заглушён
+    assert await op.bot_otpravlyal("saunamart", "c1", "staraya")   # базлайн записан
+
+
+async def test_posle_bazlaina_novoe_chuzhoe_glushit():
+    """После базлайна холодного старта СЛЕДУЮЩЕЕ новое чужое исходящее уже глушит."""
+    op = Operatory(FakeRedis())
+    ya = _FakeYadro()
+    # 1-е входящее: базлайним «staraya», бот отвечает
+    api1 = _FakeAPI(soobshcheniya=[{"id": "staraya", "direction": "out", "created": 100}])
+    await sdelat_obrabotchik("saunamart", api1, ya, None, operatory=op)(
+        _vhod(chat_id="c1", text="привет"))
+    assert await op.vedet("saunamart", "c1") is False
+    # 2-е входящее: менеджер ответил «mgr-2» (новее) — теперь глушим
+    api2 = _FakeAPI(soobshcheniya=[
+        {"id": "staraya", "direction": "out", "created": 100},
+        {"id": "mgr-2", "direction": "out", "created": 200}])
+    ya.obrabotano.clear()
+    await sdelat_obrabotchik("saunamart", api2, ya, None, operatory=op)(
+        _vhod(chat_id="c1", text="ещё вопрос"))
     assert ya.obrabotano == []
     assert await op.vedet("saunamart", "c1") is True
 

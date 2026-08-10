@@ -341,7 +341,13 @@ async def _operator_perehvatil(operatory, kod: str, api: AvitoAPI,
     Флаг уже стоит → молчим. Иначе смотрим последнее исходящее в чате: если его
     отправил не бот (нет в журнале реплик) — менеджер перехватил диалог, ставим
     флаг. Сбой запроса за сообщениями не должен глушить бота: не удалось
-    проверить — считаем, что перехвата нет (флаг ставится только по факту)."""
+    проверить — считаем, что перехвата нет (флаг ставится только по факту).
+
+    ⚠️ Холодный старт: если журнал реплик бота в чате пуст (`aktiven` = False),
+    последнее исходящее могло быть репликой самого бота ДО включения 14.8 — тогда
+    глушить нельзя. Базлайним это исходящее как «виденное» и молчим только на
+    СЛЕДУЮЩЕЕ чужое. Иначе на деплое бот замолкал бы во всех живых чатах разом
+    (поймано на первом же прогоне 10.08)."""
     if await operatory.vedet(kod, chat_id):
         logger.info("🙋 Авито «%s»: чат %s ведёт оператор — бот молчит", kod, chat_id)
         return True
@@ -350,8 +356,15 @@ async def _operator_perehvatil(operatory, kod: str, api: AvitoAPI,
     except Exception as e:  # noqa: BLE001 — детекция не роняет обработку
         log_oshibka(f"Оператор: детекция перехвата в чате {chat_id}: {e}")
         return False
-    if posl is not None and not await operatory.bot_otpravlyal(
-            kod, chat_id, posl.get("id")):
+    if posl is None:
+        return False
+    if not await operatory.aktiven(kod, chat_id):
+        # Холодный старт: не глушим, а фиксируем текущее исходящее как базовое.
+        await operatory.zapomnit_otpravlennoe(kod, chat_id, posl.get("id"))
+        logger.info("🙋 Авито «%s»: чат %s — базлайн исходящего (бот тут ещё не "
+                    "говорил под 14.8), не глушу", kod, chat_id)
+        return False
+    if not await operatory.bot_otpravlyal(kod, chat_id, posl.get("id")):
         await operatory.vzyal(kod, chat_id)
         logger.info("🙋 Авито «%s»: в чате %s ответил живой менеджер — бот замолкает "
                     "до ручного возврата из панели", kod, chat_id)
