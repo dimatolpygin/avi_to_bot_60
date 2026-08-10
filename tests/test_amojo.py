@@ -15,8 +15,10 @@ import json
 import httpx
 import pytest
 
+from types import SimpleNamespace
+
 from bot.channels.avito import Vhodyashchee, sdelat_obrabotchik, _kanal_avito
-from bot.config import AmojoConfig
+from bot.config import AmojoConfig, Config
 from bot.crm.amojo import (AmojoAPI, OshibkaAmojo, Zerkalo, payload_soobshcheniya,
                            stroka_podpisi, x_signature)
 
@@ -116,6 +118,32 @@ def test_ishodyashchee_s_receiver():
                               sender={"id": "bot", "name": "Роман"},
                               receiver={"id": "s", "name": "n"}, tekst="t")
     assert p["receiver"] == {"id": "s", "name": "n"}               # бот → sender+receiver
+
+
+# ── Config.bot_ref_id: per-account amojo_id менеджера (14.9-C) ────────────────
+
+def _ref(kod, *, glob="", po_akk=None):
+    """Резолвер читает только два поля — зовём метод на лёгком stand-in."""
+    ns = SimpleNamespace(amo_bot_ref_id=glob, amo_bot_ref_id_po_akkauntu=po_akk or {})
+    return Config.bot_ref_id(ns, kod)
+
+
+def test_bot_ref_id_pusto_daet_none():
+    assert _ref("saunamart") is None                       # ничего не задано → не зеркалим
+
+
+def test_bot_ref_id_globalnyy_folbek():
+    assert _ref("saunamart", glob="G") == "G"              # только глобальный
+
+
+def test_bot_ref_id_per_account_perekryvaet():
+    r = _ref("sbsauna", glob="G", po_akk={"sbsauna": "ROMAN", "saunamart": "ALEX"})
+    assert r == "ROMAN"                                     # per-account важнее глобального
+
+
+def test_bot_ref_id_drugoy_akkaunt_padaet_na_folbek():
+    r = _ref("sbsauna_deshman", glob="G", po_akk={"saunamart": "ALEX"})
+    assert r == "G"                                        # нет своего → глобальный
 
 
 # ── Zerkalo: формы и глушение ошибок ─────────────────────────────────────────

@@ -86,11 +86,11 @@ def _kanal_avito(kod: str, cfg: Config, yadro: Yadro, stop: asyncio.Event,
         if cfg.amo_zerkalo == "on" and cfg.amojo is not None:
             from .crm.amojo import AmojoAPI, Zerkalo
             from .profili import profil
+            ref = cfg.bot_ref_id(kod)   # amojo_id менеджера аккаунта (14.9-C)
             async with AmojoAPI(cfg.amojo) as amojo:
-                z = Zerkalo(amojo, kod, profil(kod).menedzher,
-                            bot_ref_id=cfg.amo_bot_ref_id or None)
+                z = Zerkalo(amojo, kod, profil(kod).menedzher, bot_ref_id=ref)
                 logger.info("🪞 Авито «%s»: диалог зеркалируется в amoCRM%s", kod,
-                            "" if cfg.amo_bot_ref_id else " (входящие; реплики бота — с 14.4)")
+                            " (клиент+бот)" if ref else " (пока только входящие клиента)")
                 await avito.zapustit(kod, acc, yadro, stop, belyy_spisok=spisok,
                                      zerkalo=z, zhurnal=zhurnal, operatory=operatory)
             return

@@ -178,10 +178,14 @@ class Config:
     # Режим зеркала: off (не зеркалить) | on (Авито → amoCRM, одностороннее,
     # 14.3a). Обратная сторона (ответ менеджера из amo → клиент) — 14.5.
     amo_zerkalo: str = "off"
-    # UUID пользователя amoCRM, от чьего имени показываем реплики бота как
-    # исходящие в CRM. Пусто → исходящие не зеркалим (входящие клиента — да).
-    # Появится в 14.4 с OAuth-токеном amoCRM (оттуда берётся ref_id менеджера).
+    # amojo_id пользователя amoCRM, от чьего имени показываем реплики бота как
+    # исходящие в CRM (14.9-C). Пусто → исходящие не зеркалим (входящие клиента —
+    # да). ⚠️ Это именно amojo_id из `GET /api/v4/users?with=amojo_id`, НЕ обычный
+    # uuid (`with=uuid`) — на uuid amojo отвечает «sender: user not found».
+    # `amo_bot_ref_id` — глобальный фолбэк; `_po_akkauntu` перекрывает его для
+    # конкретного аккаунта (Saunamart→Александра, SB SAUNA/Дешман→Роман).
     amo_bot_ref_id: str = ""
+    amo_bot_ref_id_po_akkauntu: dict[str, str] = field(default_factory=dict)
     # REST API amoCRM (14.4): сделки/задачи. Дефолт «пусто» → отправка выключена,
     # лид всё равно ложится в БД (ретрай по status=failed).
     amo_rest: "AmoRestConfig | None" = None
@@ -195,6 +199,14 @@ class Config:
     @property
     def debug_logi(self) -> bool:
         return self.log_level == "debug"
+
+    def bot_ref_id(self, kod: str) -> str | None:
+        """amojo_id менеджера для исходящих бота в этом аккаунте (14.9-C).
+
+        Сначала per-account, затем глобальный фолбэк; пусто → None (исходящие
+        не зеркалим, `Zerkalo.ishodyashchee` их пропускает)."""
+        ref = (self.amo_bot_ref_id_po_akkauntu.get(kod) or self.amo_bot_ref_id).strip()
+        return ref or None
 
 
 def load_config() -> Config:
@@ -241,6 +253,12 @@ def load_config() -> Config:
         amojo=_amojo(),
         amo_zerkalo=(os.environ.get("AMO_ZERKALO") or "off").strip().lower(),
         amo_bot_ref_id=(os.environ.get("AMO_BOT_REF_ID") or "").strip(),
+        amo_bot_ref_id_po_akkauntu={
+            kod: v for kod, env in (
+                ("saunamart", "AMO_BOT_REF_ID_SAUNAMART"),
+                ("sbsauna", "AMO_BOT_REF_ID_SBSAUNA"),
+                ("sbsauna_deshman", "AMO_BOT_REF_ID_DESHMAN"))
+            if (v := (os.environ.get(env) or "").strip())},
         amo_rest=_amo_rest(),
         panel_api_token=(os.environ.get("PANEL_API_TOKEN") or "").strip(),
         panel_api_port=_int("PANEL_API_PORT", 8080),
