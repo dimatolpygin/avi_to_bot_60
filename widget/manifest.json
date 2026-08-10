@@ -16,7 +16,7 @@
   "locale": ["ru", "en"],
   "locations": ["settings", "advanced_settings"],
   "advanced": {
-    "title": "left_menu.title"
+    "title": "SBAvito"
   },
   "settings": {
     "api_base": {
