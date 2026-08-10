@@ -20,7 +20,7 @@ from types import SimpleNamespace
 from bot.channels.avito import Vhodyashchee, sdelat_obrabotchik, _kanal_avito
 from bot.config import AmojoConfig, Config
 from bot.crm.amojo import (AmojoAPI, OshibkaAmojo, Zerkalo, payload_soobshcheniya,
-                           stroka_podpisi, x_signature)
+                           soobshchenie_media, stroka_podpisi, x_signature)
 
 CFG = AmojoConfig(channel_id="chan", channel_secret="secret",
                   amojo_id="acc", base_url="https://amojo.amocrm.ru")
@@ -120,6 +120,23 @@ def test_ishodyashchee_s_receiver():
     assert p["receiver"] == {"id": "s", "name": "n"}               # бот → sender+receiver
 
 
+# ── payload вложения (media, 14.9) ───────────────────────────────────────────
+
+def test_soobshchenie_media_shlet_tolko_zadannye_polya():
+    assert soobshchenie_media("picture", "https://u/p.jpg") == {
+        "type": "picture", "media": "https://u/p.jpg"}            # пустые поля не шлём
+    assert soobshchenie_media("file", "https://u/f.pdf", imya="f.pdf", razmer=10) == {
+        "type": "file", "media": "https://u/f.pdf",
+        "file_name": "f.pdf", "file_size": 10}
+
+
+def test_payload_media_vytesnyaet_tekst():
+    p = payload_soobshcheniya(
+        conversation_id="d", msgid="m", sender={"id": "s", "name": "n"},
+        soobshchenie=soobshchenie_media("picture", "https://u/p.jpg"))
+    assert p["message"] == {"type": "picture", "media": "https://u/p.jpg"}
+
+
 # ── Config.bot_ref_id: per-account amojo_id менеджера (14.9-C) ────────────────
 
 def _ref(kod, *, glob="", po_akk=None):
@@ -181,6 +198,26 @@ async def test_zerkalo_ishodyashchee_s_ref_id_bot_i_klient():
     assert p["receiver"]["id"] == "avito:42"
 
 
+async def test_zerkalo_vlozhenie_s_url_shlet_media():
+    zahvat = []
+    await _zerkalo_zahvat(zahvat).vhodyashchee_vlozhenie(
+        "c1", "m1", 42,
+        {"tip": "picture", "url": "https://u/p.jpg", "imya": "photo.jpg", "razmer": None})
+    p = zahvat[0]
+    assert p["conversation_id"] == "sbsauna:c1"
+    assert p["sender"]["id"] == "avito:42" and "receiver" not in p   # клиент, входящее
+    assert p["message"] == {"type": "picture", "media": "https://u/p.jpg",
+                            "file_name": "photo.jpg"}
+
+
+async def test_zerkalo_vlozhenie_bez_url_ne_shlet():
+    # voice/video/file без публичного URL — зеркалить нечего, тихо пропускаем.
+    zahvat = []
+    await _zerkalo_zahvat(zahvat).vhodyashchee_vlozhenie(
+        "c1", "m1", 42, {"tip": "voice", "url": None})
+    assert zahvat == []
+
+
 async def test_zerkalo_glushit_oshibku_ne_ronyaet():
     class _API:
         async def new_message(self, payload):
@@ -215,9 +252,13 @@ class _SpyZerkalo:
     def __init__(self):
         self.vhod = []
         self.ishod = []
+        self.vlozh = []
 
     async def vhodyashchee(self, chat_id, msg_id, avtor_id, tekst, *, imya=None):
         self.vhod.append((chat_id, msg_id, avtor_id, tekst))
+
+    async def vhodyashchee_vlozhenie(self, chat_id, msg_id, avtor_id, vlozhenie, *, imya=None):
+        self.vlozh.append((chat_id, vlozhenie))
 
     async def ishodyashchee(self, chat_id, tekst, *, avtor_id=None, imya_klienta=None):
         self.ishod.append((chat_id, tekst, avtor_id))
@@ -235,6 +276,22 @@ async def test_obrabotchik_zerkalit_vhodyashchee_pered_yadrom():
 
     assert z.vhod == [("c1", "m1", 42, "сколько стоит")]
     assert ya.obrabotano and ya.obrabotano[0][1] == "сколько стоит"
+
+
+async def test_obrabotchik_zerkalit_vlozhenie_klienta():
+    # Фото клиента (текста нет) → зеркалим в amoCRM, ядру не отдаём, просим текст.
+    ya, api, z = _FakeYadro(), _FakeAPI(), _SpyZerkalo()
+    obr = sdelat_obrabotchik("sbsauna", api, ya, None, zerkalo=z)
+    v = Vhodyashchee(chat_id="c1", msg_id="m1", author_id=42, tekst=None,
+                     obyavlenie=None,
+                     vlozhenie={"tip": "picture", "url": "https://u/p.jpg",
+                                "imya": "photo.jpg", "razmer": None})
+    await obr(v)
+
+    assert z.vlozh == [("c1", {"tip": "picture", "url": "https://u/p.jpg",
+                               "imya": "photo.jpg", "razmer": None})]
+    assert ya.obrabotano == []                                    # картинку ядру не отдаём
+    assert api.otpravleno and "текстом" in api.otpravleno[0][1]   # просим написать
 
 
 async def test_kanal_zerkalit_ishodyashchee_posle_otpravki():

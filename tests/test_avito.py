@@ -48,6 +48,35 @@ def test_izvlech_kartinka_bez_teksta_daet_none_tekst():
     assert v is not None and v.tekst is None                    # вложение — не отбрасываем
 
 
+def _chat_kartinka(chat_id="c1", msg_id="m1"):
+    return {"id": chat_id,
+            "last_message": {"id": msg_id, "author_id": 42, "direction": "in",
+                             "type": "image",
+                             "content": {"image": {"sizes": {
+                                 "140x105": "https://cdn/small.jpg",
+                                 "1280x960": "https://cdn/big.jpg"}}}}}
+
+
+def test_izvlech_kartinka_daet_vlozhenie_s_krupneyshim_url():
+    v = izvlech_vhodyashchee(_chat_kartinka())
+    assert v.tekst is None
+    assert v.vlozhenie == {"tip": "picture", "url": "https://cdn/big.jpg",
+                           "imya": "photo.jpg", "razmer": None}   # выбрана крупнейшая
+
+
+def test_izvlech_golos_pomechaet_tip_bez_url():
+    chat = {"id": "c1", "last_message": {"id": "m1", "direction": "in",
+                                         "type": "voice",
+                                         "content": {"voice": {"voice_id": "v"}}}}
+    v = izvlech_vhodyashchee(chat)
+    assert v.vlozhenie == {"tip": "voice", "url": None, "imya": None, "razmer": None}
+
+
+def test_izvlech_tekst_bez_vlozheniya():
+    v = izvlech_vhodyashchee(_chat_vhod(text="привет"))
+    assert v.vlozhenie is None                                   # текст — не вложение
+
+
 def test_izvlech_tyanet_obyavlenie_iz_konteksta():
     v = izvlech_vhodyashchee(_chat_vhod(item={"id": 8246919725,
                                               "title": "Отделка бани под ключ",

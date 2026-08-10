@@ -146,13 +146,35 @@ def _uchastnik(uid: str, imya: str, telefon: str | None = None,
     return u
 
 
+def soobshchenie_media(tip: str, media: str, *, imya: str | None = None,
+                       razmer: int | None = None,
+                       dlitelnost: int | None = None) -> dict:
+    """Объект `message` для вложения (14.9): картинка/файл/видео/голос.
+
+    `tip` — уже в терминах amojo (`picture`/`file`/`video`/`voice`); `media` —
+    ПУБЛИЧНЫЙ URL файла (amojo сам его подтянет). `file_name`/`file_size` и
+    `media_duration` добавляем, только если заданы: лишние пустые поля amojo не
+    любит."""
+    m: dict = {"type": tip, "media": media}
+    if imya:
+        m["file_name"] = imya
+    if razmer:
+        m["file_size"] = razmer
+    if dlitelnost:
+        m["media_duration"] = dlitelnost
+    return m
+
+
 def payload_soobshcheniya(*, conversation_id: str, msgid: str, sender: dict,
-                          tekst: str, receiver: dict | None = None,
-                          silent: bool = False) -> dict:
+                          tekst: str | None = None, receiver: dict | None = None,
+                          silent: bool = False,
+                          soobshchenie: dict | None = None) -> dict:
     """Тело `payload` для new_message.
 
     Входящее (от клиента) — только `sender`. Исходящее (бот) — `sender`+`receiver`.
-    Направление в amoCRM определяется наличием `receiver`.
+    Направление в amoCRM определяется наличием `receiver`. Обычное сообщение —
+    текст (`tekst`); вложение — готовый объект `soobshchenie` (см.
+    `soobshchenie_media`), он вытесняет текст.
     """
     now = time.time()
     p: dict = {
@@ -161,7 +183,8 @@ def payload_soobshcheniya(*, conversation_id: str, msgid: str, sender: dict,
         "msgid": msgid,
         "conversation_id": conversation_id,
         "sender": sender,
-        "message": {"type": "text", "text": tekst},
+        "message": soobshchenie if soobshchenie is not None
+        else {"type": "text", "text": tekst or ""},
         "silent": silent,
     }
     if receiver is not None:
@@ -213,6 +236,30 @@ class Zerkalo:
             logger.info("📤 amoCRM ← клиент (чат %s): зеркалировано входящее", chat_id)
         except Exception as e:  # noqa: BLE001 — зеркало не роняет диалог
             log_oshibka(f"amoCRM зеркало (входящее, чат {chat_id}): {e}")
+
+    async def vhodyashchee_vlozhenie(self, chat_id: str, msg_id: str, avtor_id,
+                                     vlozhenie: dict, *,
+                                     imya: str | None = None) -> None:
+        """Вложение клиента (фото) → входящее в amoCRM как media-сообщение.
+
+        Зеркалим только то, у чего есть публичный `url` (пока — картинки): без
+        него amojo нечего подтягивать, а voice/video/file требуют доп. запроса за
+        файлом (это позже). Нет url → тихо выходим, диалог не трогаем."""
+        url = (vlozhenie or {}).get("url")
+        if not url:
+            return
+        try:
+            await self.api.new_message(payload_soobshcheniya(
+                conversation_id=self._dialog(chat_id),
+                msgid=f"avito:{msg_id}",
+                sender=self._klient(chat_id, avtor_id, imya),
+                soobshchenie=soobshchenie_media(
+                    vlozhenie.get("tip") or "picture", url,
+                    imya=vlozhenie.get("imya"), razmer=vlozhenie.get("razmer"))))
+            logger.info("📤 amoCRM ← клиент (чат %s): зеркалировано вложение (%s)",
+                        chat_id, vlozhenie.get("tip"))
+        except Exception as e:  # noqa: BLE001 — зеркало не роняет диалог
+            log_oshibka(f"amoCRM зеркало (вложение, чат {chat_id}): {e}")
 
     async def ishodyashchee(self, chat_id: str, tekst: str, *, avtor_id=None,
                             imya_klienta: str | None = None) -> None:

@@ -174,6 +174,45 @@ class Vhodyashchee:
     author_id: int | None
     tekst: str | None                 # None у картинок/голоса — текста нет
     obyavlenie: dict | None           # context.value: {id,title,price_string,url,...}
+    vlozhenie: dict | None = None     # {tip, url, imya, razmer} — фото/файл клиента (14.9)
+
+
+def _krupneyshaya_kartinka(sizes: dict) -> str | None:
+    """URL самой крупной версии картинки из карты Авито `{"1280x960": url, …}`.
+
+    Ключи — «ШИРИНАxВЫСОТА»; берём максимальную площадь. Нераспознанный ключ
+    (или пустая карта) не роняет — просто пропускаем."""
+    luchshaya: tuple[int, str] | None = None
+    for razmer, url in (sizes or {}).items():
+        if not url:
+            continue
+        try:
+            sh, vys = str(razmer).lower().split("x")
+            ploshchad = int(sh) * int(vys)
+        except (ValueError, AttributeError):
+            ploshchad = 0
+        if luchshaya is None or ploshchad > luchshaya[0]:
+            luchshaya = (ploshchad, url)
+    return luchshaya[1] if luchshaya else None
+
+
+def _izvlech_vlozhenie(lm: dict) -> dict | None:
+    """Вытащить вложение из `last_message`: `{tip, url, imya, razmer}` или None.
+
+    Полностью зеркалим (есть публичный URL) пока только `image` — клиент шлёт
+    фото товара/помещения, а его CDN-URL Авито отдаёт прямо в `content`. Прочие
+    вложения (voice/video/file) требуют доп. запроса за файлом — их тип помечаем
+    (`url=None`), чтобы лог и обработчик знали, ЧТО пришло, но в amoCRM пока не
+    тянем. `tip` — уже в терминах amojo (`picture` для картинки)."""
+    tip = lm.get("type")
+    if not tip or tip == "text":
+        return None
+    content = lm.get("content") or {}
+    if tip == "image":
+        url = _krupneyshaya_kartinka((content.get("image") or {}).get("sizes") or {})
+        if url:
+            return {"tip": "picture", "url": url, "imya": "photo.jpg", "razmer": None}
+    return {"tip": tip, "url": None, "imya": None, "razmer": None}
 
 
 def izvlech_vhodyashchee(chat: dict) -> Vhodyashchee | None:
@@ -198,6 +237,7 @@ def izvlech_vhodyashchee(chat: dict) -> Vhodyashchee | None:
         author_id=lm.get("author_id"),
         tekst=content.get("text"),
         obyavlenie=obyavlenie,
+        vlozhenie=_izvlech_vlozhenie(lm),
     )
 
 
@@ -307,6 +347,16 @@ _PROSBA_TEKSTOM = ("Вложение вижу, но прочитать его н
                    "текстом, что нужно.")
 
 
+def _marker_vlozheniya(vlozhenie: dict | None) -> str:
+    """Короткая пометка вложения для журнала-панели (менеджер видит, ЧТО пришло)."""
+    tip = (vlozhenie or {}).get("tip")
+    if tip == "picture":
+        return "📷 фото"
+    if tip:
+        return f"📎 вложение ({tip})"
+    return "📎 вложение"
+
+
 async def zapustit(kod: str, cfg: AvitoConfig, yadro, stop: asyncio.Event, *,
                    belyy_spisok: frozenset[str] | None = None, zerkalo=None,
                    zhurnal=None, operatory=None) -> None:
@@ -384,8 +434,9 @@ def sdelat_obrabotchik(kod: str, api: AvitoAPI, yadro,
     Порядок для текста: сперва зеркалим входящее в amoCRM (менеджер видит вопрос
     клиента даже если бот замолчит) и пишем в журнал, потом проверяем перехват
     оператором и только затем отдаём ядру; исходящие бота зеркалит и журналит
-    обёртка `_kanal_avito`. Вложение (текста нет) в amoCRM пока не зеркалим, но
-    в журнал кладём просьбу текстом — это ответ клиенту.
+    обёртка `_kanal_avito`. Вложение (текста нет, 14.9) зеркалим в amoCRM как
+    media и кладём маркер в журнал (менеджер видит фото); ядру не отдаём —
+    прочитать картинку бот не может, поэтому просим клиента написать текстом.
     """
     async def obrabotchik(v: Vhodyashchee) -> None:
         if belyy_spisok is not None and v.chat_id not in belyy_spisok:
@@ -394,9 +445,16 @@ def sdelat_obrabotchik(kod: str, api: AvitoAPI, yadro,
             return
         imya = f"avito:{v.author_id}" if v.author_id else f"avito:{v.chat_id}"
         if v.tekst is None:
-            # Вложение без текста: под оператором молчим и здесь — не перебиваем
-            # менеджера дежурной просьбой; иначе отвечаем короткой просьбой
-            # напрямую, ядру передавать нечего (как адаптер Telegram).
+            # Вложение без текста (14.9). Сперва зеркалим его в amoCRM и журнал —
+            # менеджер увидит фото клиента даже если бот под оператором молчит;
+            # прочитать картинку бот не может, ядру передавать нечего.
+            if zerkalo is not None and v.vlozhenie:
+                await zerkalo.vhodyashchee_vlozhenie(
+                    v.chat_id, v.msg_id, v.author_id, v.vlozhenie, imya=imya)
+            if zhurnal is not None:
+                await zhurnal.vhodyashchee(
+                    v.chat_id, _marker_vlozheniya(v.vlozhenie), imya=imya)
+            # Под оператором не перебиваем менеджера дежурной просьбой.
             if operatory is not None and await operatory.vedet(kod, v.chat_id):
                 logger.info("🙋 Авито «%s»: вложение в чате %s, но ведёт оператор — молчу",
                             kod, v.chat_id)
@@ -404,8 +462,9 @@ def sdelat_obrabotchik(kod: str, api: AvitoAPI, yadro,
             await api.otpravit(v.chat_id, _PROSBA_TEKSTOM)
             if zhurnal is not None:
                 await zhurnal.ishodyashchee(v.chat_id, _PROSBA_TEKSTOM)
-            logger.info("👤 Авито «%s»: вложение без текста в чате %s — попросил текстом",
-                        kod, v.chat_id)
+            logger.info("👤 Авито «%s»: вложение (%s) без текста в чате %s — "
+                        "зеркалю и прошу текстом", kod,
+                        (v.vlozhenie or {}).get("tip") or "?", v.chat_id)
             return
         if zerkalo is not None:
             await zerkalo.vhodyashchee(v.chat_id, v.msg_id, v.author_id, v.tekst)
