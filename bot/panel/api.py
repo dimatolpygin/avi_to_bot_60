@@ -19,6 +19,9 @@ API не поднимается вовсе (штатный выключател�
 """
 from __future__ import annotations
 
+import hashlib
+import hmac
+import json
 from datetime import datetime
 
 from aiohttp import web
@@ -126,12 +129,57 @@ def token_veren(request: web.Request, token: str) -> bool:
 
 @web.middleware
 async def _avtorizaciya(request: web.Request, handler):
-    """Всё под `/api`, кроме health и preflight, требует токен."""
-    if request.method == "OPTIONS" or request.path == "/api/health":
+    """Всё под `/api`, кроме health и preflight, требует токен. Вебхук amoJo
+    (`/amojo/…`) авторизуется своей HMAC-подписью, не bearer-токеном панели —
+    его пускаем мимо (проверка подписи внутри ручки)."""
+    if (request.method == "OPTIONS" or request.path == "/api/health"
+            or request.path.startswith("/amojo/")):
         return await handler(request)
     if not token_veren(request, request.app["token"]):
         return web.json_response({"error": "нет доступа"}, status=401)
     return await handler(request)
+
+
+# ── Вебхук amoJo (amo → клиент, 14.9-B) ──────────────────────────────────────
+
+def podpis_amojo_verna(telo: bytes, secret: str, zagolovok: str | None) -> bool:
+    """X-Signature amoCRM Chat API: HMAC-SHA1 (hex, нижний регистр) над СЫРЫМ
+    телом запроса, ключ — секрет канала. Пустой секрет/заголовок → не пускаем."""
+    if not secret or not zagolovok:
+        return False
+    nasha = hmac.new(secret.encode("utf-8"), telo, hashlib.sha1).hexdigest()
+    return hmac.compare_digest(nasha, zagolovok.strip().lower())
+
+
+async def _amojo_vebhuk(request: web.Request) -> web.Response:
+    """`POST /amojo/{scope_id}` — событие из amoCRM (менеджер написал в карточке).
+
+    Порядок: проверяем подпись СЫРОГО тела → логируем → отдаём обработчику в
+    фоне логики. По доке Chat API канал обязан вернуть 200, а бизнес-логику
+    делать асинхронно; ошибки обработчика не должны срывать 200 (иначе amoJo
+    будет ретраить). Пока обработчик не задан (диагностическая фаза 14.9-B) —
+    только логируем сырое тело, чтобы снять реальную форму вебхука с живого
+    аккаунта (нужно поле `conversation.client_id` и проверка на эхо наших же
+    импортов — риск петли)."""
+    telo = await request.read()
+    scope_id = request.match_info.get("scope_id", "")
+    if not podpis_amojo_verna(telo, request.app.get("amojo_secret") or "",
+                              request.headers.get("X-Signature")):
+        log_oshibka(f"amoJo вебхук (scope {scope_id}): подпись не сошлась — отклоняю")
+        return web.json_response({"error": "bad signature"}, status=403)
+    try:
+        dannye = json.loads(telo.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        dannye = None
+    logger.info("📥 amoJo вебхук (scope %s): %s", scope_id,
+                telo.decode("utf-8", "replace")[:2000])
+    obrabotchik = request.app.get("amojo_obrabotchik")
+    if obrabotchik is not None and dannye is not None:
+        try:
+            await obrabotchik(dannye)
+        except Exception as e:  # noqa: BLE001 — 200 отдаём всегда, иначе ретраи
+            log_oshibka(f"amoJo вебхук (scope {scope_id}): обработчик упал: {e}")
+    return web.json_response({"ok": True})
 
 
 @web.middleware
@@ -211,30 +259,39 @@ async def _dialog(request: web.Request) -> web.Response:
 
 
 def sozdat_prilozhenie(fabrika_sessiy, token: str, origin: str = "*",
-                       operatory=None) -> web.Application:
+                       operatory=None, *, amojo_secret: str = "",
+                       amojo_obrabotchik=None) -> web.Application:
     """Собрать aiohttp-приложение. Отдельно от запуска — чтобы тесты поднимали
     его на тестовом сервере без реальной БД. `operatory` (14.8) — управление
-    перехватом оператором (статус чата + кнопка возврата бота)."""
+    перехватом оператором (статус чата + кнопка возврата бота). `amojo_secret`
+    (14.9-B) — секрет канала для проверки подписи вебхука amoJo; `amojo_obrabotchik`
+    — колбэк на разобранное событие (пусто → диагностический режим, только лог)."""
     app = web.Application(middlewares=[_cors, _avtorizaciya])
     app["fabrika"] = fabrika_sessiy
     app["token"] = token
     app["origin"] = origin
     app["operatory"] = operatory
+    app["amojo_secret"] = amojo_secret
+    app["amojo_obrabotchik"] = amojo_obrabotchik
     app.router.add_get("/api/health", _health)
     app.router.add_get("/api/chats", _chaty)
     app.router.add_get("/api/dialog/{id}", _dialog)
     app.router.add_post("/api/dialog/{id}/resume", _vernut_bota)
+    app.router.add_post("/amojo/{scope_id}", _amojo_vebhuk)
     return app
 
 
 async def zapustit(fabrika_sessiy, token: str, *, port: int, host: str = "0.0.0.0",
-                   origin: str = "*", stop=None, operatory=None) -> None:
+                   origin: str = "*", stop=None, operatory=None,
+                   amojo_secret: str = "", amojo_obrabotchik=None) -> None:
     """Поднять API и держать до сигнала остановки. Токен пуст — не поднимаемся
     (проверяется вызывающим, здесь на всякий случай тоже)."""
     if not token:
         logger.info("🧩 Панель-API: токен не задан — не поднимаю")
         return
-    app = sozdat_prilozhenie(fabrika_sessiy, token, origin, operatory)
+    app = sozdat_prilozhenie(fabrika_sessiy, token, origin, operatory,
+                             amojo_secret=amojo_secret,
+                             amojo_obrabotchik=amojo_obrabotchik)
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, host, port)

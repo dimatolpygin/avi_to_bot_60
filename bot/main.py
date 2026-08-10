@@ -208,10 +208,17 @@ async def main() -> None:
         # не должно ронять ботов и наоборот.
         if cfg.panel_api_token:
             from .panel import api as panel_api
+            # Секрет канала amoJo (14.9-B): тот же aiohttp-сервер принимает вебхук
+            # `POST /amojo/{scope_id}` (менеджер написал в карточке). Фаза 1 —
+            # диагностика: обработчик не задан, ручка только проверяет подпись и
+            # логирует сырое тело, чтобы снять реальную форму вебхука с живого
+            # аккаунта до включения действия (отправка клиенту + флаг оператора).
+            amojo_secret = cfg.amojo.channel_secret if cfg.amojo is not None else ""
             tasks.append(asyncio.create_task(
                 _supervise("панель-API", lambda: panel_api.zapustit(
                     fabrika_sessiy, cfg.panel_api_token, port=cfg.panel_api_port,
-                    origin=cfg.panel_cors_origin, stop=stop, operatory=operatory)),
+                    origin=cfg.panel_cors_origin, stop=stop, operatory=operatory,
+                    amojo_secret=amojo_secret)),
                 name="панель-API"))
 
         if not tasks:

@@ -191,3 +191,76 @@ async def test_preflight_options_bez_tokena():
         resp = await kl.options("/api/chats")
         assert resp.status == 204
         assert resp.headers["Access-Control-Allow-Origin"] == "https://x.amocrm.ru"
+
+
+# ── Вебхук amoJo (14.9-B) ─────────────────────────────────────────────────────
+import hashlib
+import hmac
+import json
+
+
+def _podpis(telo: bytes, secret: str) -> str:
+    return hmac.new(secret.encode("utf-8"), telo, hashlib.sha1).hexdigest()
+
+
+def test_podpis_amojo_verna_i_neverna():
+    telo = b'{"a":1}'
+    assert api.podpis_amojo_verna(telo, "sek", _podpis(telo, "sek")) is True
+    assert api.podpis_amojo_verna(telo, "sek", _podpis(telo, "drugoy")) is False
+    # верхний регистр заголовка допустим (amoJo шлёт hex; сверяем без регистра)
+    assert api.podpis_amojo_verna(telo, "sek", _podpis(telo, "sek").upper()) is True
+
+
+def test_podpis_amojo_pustoy_sekret_ili_zagolovok():
+    assert api.podpis_amojo_verna(b"x", "", "abc") is False
+    assert api.podpis_amojo_verna(b"x", "sek", None) is False
+
+
+def _prilozhenie_amojo(secret="sek", obrabotchik=None):
+    return api.sozdat_prilozhenie(_fabrika(_Rezult(stroki=[])), token="sekret",
+                                  amojo_secret=secret, amojo_obrabotchik=obrabotchik)
+
+
+async def test_amojo_vebhuk_bez_tokena_no_s_podpisyu_200():
+    """Вебхук не требует bearer-токен панели — только верную подпись."""
+    telo = json.dumps({"message": {"message": {"text": "привет"}}}).encode("utf-8")
+    async with TestClient(TestServer(_prilozhenie_amojo())) as kl:
+        resp = await kl.post("/amojo/chan_acc", data=telo,
+                             headers={"X-Signature": _podpis(telo, "sek")})
+        assert resp.status == 200 and (await resp.json())["ok"] is True
+
+
+async def test_amojo_vebhuk_podpis_neverna_403():
+    telo = b'{"message": {}}'
+    async with TestClient(TestServer(_prilozhenie_amojo())) as kl:
+        resp = await kl.post("/amojo/chan_acc", data=telo,
+                             headers={"X-Signature": "deadbeef"})
+        assert resp.status == 403
+
+
+async def test_amojo_vebhuk_zovyot_obrabotchik_na_razobrannom():
+    poluchennoe = []
+
+    async def obrabotchik(dannye):
+        poluchennoe.append(dannye)
+
+    telo = json.dumps({"message": {"conversation": {"id": "skc-1"}}}).encode("utf-8")
+    app = _prilozhenie_amojo(obrabotchik=obrabotchik)
+    async with TestClient(TestServer(app)) as kl:
+        resp = await kl.post("/amojo/chan_acc", data=telo,
+                             headers={"X-Signature": _podpis(telo, "sek")})
+        assert resp.status == 200
+    assert poluchennoe == [{"message": {"conversation": {"id": "skc-1"}}}]
+
+
+async def test_amojo_vebhuk_sboy_obrabotchika_vsyo_ravno_200():
+    """Ошибка бизнес-логики не должна срывать 200 (иначе amoJo ретраит)."""
+    async def obrabotchik(_dannye):
+        raise RuntimeError("бах")
+
+    telo = json.dumps({"message": {}}).encode("utf-8")
+    app = _prilozhenie_amojo(obrabotchik=obrabotchik)
+    async with TestClient(TestServer(app)) as kl:
+        resp = await kl.post("/amojo/chan_acc", data=telo,
+                             headers={"X-Signature": _podpis(telo, "sek")})
+        assert resp.status == 200
