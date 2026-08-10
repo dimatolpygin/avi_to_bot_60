@@ -248,6 +248,54 @@ async def test_vlozhenie_bez_teksta_prosit_tekstom_ne_zovet_yadro():
     assert api.otpravleno and "текстом" in api.otpravleno[0][1]
 
 
+class _FakeOperatory:
+    def __init__(self, vedet=False):
+        self._vedet = vedet
+        self.zapomneno = []
+
+    async def vedet(self, kod, chat):
+        return self._vedet
+
+    async def zapomnit_otpravlennoe(self, kod, chat, msg_id):
+        self.zapomneno.append((chat, msg_id))
+
+
+class _ApiSId:
+    """Как _FakeAPI, но otpravit возвращает id — нужен журналу оператора."""
+
+    def __init__(self):
+        self.otpravleno = []
+
+    async def otpravit(self, chat_id, tekst):
+        self.otpravleno.append((chat_id, tekst))
+        return {"id": "p1"}
+
+
+def _chat_foto():
+    return {"id": "c1", "last_message": {"id": "m1", "direction": "in", "type": "image",
+            "content": {"image": {"sizes": {"1280x960": "https://u/big.jpg"}}}}}
+
+
+async def test_vlozhenie_prompt_pishetsya_v_zhurnal_operatora():
+    # id просьбы «напишите текстом» обязан попасть в журнал бота — иначе следующее
+    # сообщение клиента детектор примет за ответ оператора и заглушит бота.
+    ya, api, op = _FakeYadro(), _ApiSId(), _FakeOperatory()
+    obr = sdelat_obrabotchik("sbsauna", api, ya, None, operatory=op)
+    await obr(izvlech_vhodyashchee(_chat_foto()))
+
+    assert op.zapomneno == [("c1", "p1")]                # id промпта записан
+    assert api.otpravleno and "текстом" in api.otpravleno[0][1]
+
+
+async def test_vlozhenie_pod_operatorom_molchit():
+    ya, api, op = _FakeYadro(), _ApiSId(), _FakeOperatory(vedet=True)
+    obr = sdelat_obrabotchik("sbsauna", api, ya, None, operatory=op)
+    await obr(izvlech_vhodyashchee(_chat_foto()))
+
+    assert api.otpravleno == []                          # менеджера не перебиваем
+    assert op.zapomneno == []
+
+
 async def test_obyavlenie_zapominaetsya_pered_obrabotkoy():
     ya, api = _FakeYadro(), _FakeAPI()
     obr = sdelat_obrabotchik("sbsauna", api, ya, None)

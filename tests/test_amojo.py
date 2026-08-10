@@ -292,6 +292,7 @@ async def test_obrabotchik_zerkalit_vlozhenie_klienta():
                                "imya": "photo.jpg", "razmer": None})]
     assert ya.obrabotano == []                                    # картинку ядру не отдаём
     assert api.otpravleno and "текстом" in api.otpravleno[0][1]   # просим написать
+    assert z.ishod and "текстом" in z.ishod[0][1]                 # и просьба зеркалится в amoCRM
 
 
 async def test_kanal_zerkalit_ishodyashchee_posle_otpravki():

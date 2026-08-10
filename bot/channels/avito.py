@@ -459,9 +459,14 @@ def sdelat_obrabotchik(kod: str, api: AvitoAPI, yadro,
                 logger.info("🙋 Авито «%s»: вложение в чате %s, но ведёт оператор — молчу",
                             kod, v.chat_id)
                 return
-            await api.otpravit(v.chat_id, _PROSBA_TEKSTOM)
-            if zhurnal is not None:
-                await zhurnal.ishodyashchee(v.chat_id, _PROSBA_TEKSTOM)
+            # Просьбу текстом гоним через ТОТ ЖЕ канал, что и обычные ответы бота:
+            # она уходит клиенту, зеркалится в amoCRM (менеджер видит ответ бота, а
+            # не только фото) и журналится. Главное — её id пишется в журнал
+            # оператора: иначе следующее сообщение клиента детектор примет за ответ
+            # живого менеджера и ложно заглушит бота.
+            await _kanal_avito(api, v.chat_id, imya, zerkalo=zerkalo,
+                               avtor_id=v.author_id, zhurnal=zhurnal,
+                               operatory=operatory, kod=kod).otpravit(_PROSBA_TEKSTOM)
             logger.info("👤 Авито «%s»: вложение (%s) без текста в чате %s — "
                         "зеркалю и прошу текстом", kod,
                         (v.vlozhenie or {}).get("tip") or "?", v.chat_id)
