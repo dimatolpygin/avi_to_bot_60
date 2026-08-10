@@ -238,20 +238,50 @@ class Zerkalo:
 
 # ── Смоук вручную ────────────────────────────────────────────────────────────
 
+async def _uznat_amojo_id_menedzherov(rest) -> None:  # pragma: no cover - живой REST
+    """Диагностика 14.9-C: спросить у REST amoCRM amojo-id/uuid пользователей.
+
+    Кандидат на `sender.ref_id` для исходящих. По доке ref_id менеджера —
+    amojo-идентификатор, а не plain-uuid из обычного `/users`; пробуем оба
+    расширения (`amojo_id`, `uuid`) и печатаем, что вернулось.
+    """
+    for rasshirenie in ("amojo_id", "uuid"):
+        try:
+            async with httpx.AsyncClient(base_url=rest.base_url, timeout=TAYMAUT_S) as kl:
+                r = await kl.get("/api/v4/users",
+                                 params={"with": rasshirenie, "limit": 50},
+                                 headers={"Authorization": f"Bearer {rest.access_token}"})
+            print(f"\n— GET /api/v4/users?with={rasshirenie} → HTTP {r.status_code}")
+            if r.status_code >= 400:
+                print("  тело:", r.text[:400])
+                continue
+            users = (r.json().get("_embedded") or {}).get("users") or []
+            for u in users:
+                print(f"  id={u.get('id')} {u.get('name')!r} "
+                      f"amojo_id={u.get('amojo_id')} uuid={u.get('uuid')}")
+        except Exception as e:  # noqa: BLE001
+            print(f"  ошибка запроса users?with={rasshirenie}: {e}")
+
+
 def _smoke() -> None:  # pragma: no cover - ручной прогон, ходит в живой amoCRM
-    """`python -m bot.crm.amojo connect|test`.
+    """`python -m bot.crm.amojo connect|test|diag`.
 
     `connect` — идемпотентно подключает канал к аккаунту. `test` — шлёт пробную
     пару сообщений (клиент+бот) в тестовый чат: появится видимая переписка в CRM.
-    Оба действия ПИШУТ в живой аккаунт amoCRM.
+    `diag` (14.9-C) — шлёт ОДНО входящее в тестовый чат и печатает ПОЛНЫЙ ответ
+    amojo (ищем присвоенный `ref_id` участника), затем спрашивает у REST amojo-id
+    менеджеров. Не шлёт исходящее — только собирает данные для настройки
+    `AMO_BOT_REF_ID`. Все три ПИШУТ в живой аккаунт amoCRM.
     """
     import asyncio
+    import json as _json
     import sys
 
     from ..config import load_config
 
     komanda = sys.argv[1] if len(sys.argv) > 1 else "connect"
-    cfg = load_config().amojo
+    polny = load_config()
+    cfg = polny.amojo
     if cfg is None:
         print("Креды канала amoCRM не заданы в .env "
               "(AMOJO_CHANNEL_ID/AMOJO_CHANNEL_SECRET/AMOJO_ID).")
@@ -268,6 +298,39 @@ def _smoke() -> None:  # pragma: no cover - ручной прогон, ходи�
                 await z.ishodyashchee("smoke-chat", "Тестовый ответ бота",
                                       avtor_id=999, imya_klienta="Тест Клиент")
                 print("пара сообщений отправлена в чат smoke-chat")
+            elif komanda == "diag":
+                payload = payload_soobshcheniya(
+                    conversation_id="sbsauna:diag-chat",
+                    msgid=f"diag:{int(time.time() * 1000)}",
+                    sender=_uchastnik("avito:diag-999", "Диаг Клиент"),
+                    tekst="Диагностика 14.9-C: читаю ответ amojo")
+                try:
+                    otvet = await api.new_message(payload)
+                    print("— new_message ответ amojo:")
+                    print(_json.dumps(otvet, ensure_ascii=False, indent=2))
+                except OshibkaAmojo as e:
+                    print(f"— new_message упал: HTTP {e.status}: {e}")
+                if polny.amo_rest is not None and polny.amo_rest.zapolnen:
+                    await _uznat_amojo_id_menedzherov(polny.amo_rest)
+                else:
+                    print("\n(AMO REST не настроен — пропускаю опрос users)")
+            elif komanda == "diag-out":
+                ref = sys.argv[2] if len(sys.argv) > 2 else ""
+                if not ref:
+                    print("укажи ref_id (amojo_id менеджера): diag-out <amojo_id>")
+                    return
+                payload = payload_soobshcheniya(
+                    conversation_id="sbsauna:diag-chat",
+                    msgid=f"diag-out:{int(time.time() * 1000)}",
+                    sender=_uchastnik("bot:sbsauna", "Роман", ref_id=ref),
+                    receiver=_uchastnik("avito:diag-999", "Диаг Клиент"),
+                    tekst="Диагностика 14.9-C: исходящее от менеджера (ref_id проверка)")
+                try:
+                    otvet = await api.new_message(payload)
+                    print("— исходящее ПРИНЯТО amojo:")
+                    print(_json.dumps(otvet, ensure_ascii=False, indent=2))
+                except OshibkaAmojo as e:
+                    print(f"— исходящее ОТКЛОНЕНО: HTTP {e.status}: {e}")
             else:
                 print("неизвестная команда:", komanda)
 
