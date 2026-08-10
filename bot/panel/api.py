@@ -71,6 +71,20 @@ async def spisok_chatov(fabrika_sessiy, *, limit: int = _LIMIT_CHATOV) -> list[d
     ]
 
 
+async def dialog_adres(fabrika_sessiy, dialog_id: int) -> tuple[str, str] | None:
+    """(код аккаунта, chat_key) диалога — для снятия флага оператора (14.8).
+
+    Возвращает None, если диалога нет. `chat_key` у Авито — это `chat_id`, тот же
+    ключ, по которому поллер ставит/снимает флаг перехвата в Redis."""
+    async with fabrika_sessiy() as sessiya:
+        stroka = (await sessiya.execute(
+            select(Account.code, Dialog.chat_key)
+            .join(Account, Account.id == Dialog.account_id)
+            .where(Dialog.id == dialog_id)
+        )).first()
+    return (stroka[0], stroka[1]) if stroka else None
+
+
 async def soobshcheniya_dialoga(fabrika_sessiy, dialog_id: int) -> list[dict] | None:
     """Вся переписка диалога по возрастанию времени. Диалога нет → None
     (ручка отдаст 404), пустой (заведён, реплик нет) → []."""
@@ -130,7 +144,7 @@ async def _cors(request: web.Request, handler):
         otvet = await handler(request)
     otvet.headers["Access-Control-Allow-Origin"] = request.app["origin"]
     otvet.headers["Access-Control-Allow-Headers"] = "Authorization, Content-Type"
-    otvet.headers["Access-Control-Allow-Methods"] = "GET, OPTIONS"
+    otvet.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
     return otvet
 
 
@@ -146,7 +160,39 @@ async def _chaty(request: web.Request) -> web.Response:
     except Exception as e:  # noqa: BLE001 — БД легла: 503, а не пустая лента
         log_oshibka(f"Панель: список чатов не отдан: {e}")
         return web.json_response({"error": "база недоступна"}, status=503)
+    # Пометка «чат ведёт оператор» (14.8): панель показывает бейдж и кнопку
+    # возврата бота. Флаг в Redis — сбой не должен ронять список, поэтому мягко.
+    operatory = request.app.get("operatory")
+    if operatory is not None:
+        for c in chaty:
+            try:
+                c["operator"] = await operatory.vedet(c["account"], c["chat_key"])
+            except Exception:  # noqa: BLE001
+                c["operator"] = False
     return web.json_response({"chats": chaty})
+
+
+async def _vernut_bota(request: web.Request) -> web.Response:
+    """`POST /api/dialog/{id}/resume` — снять перехват оператором, вернуть бота
+    в чат (14.8). Кнопка в панели: менеджер закончил вести диалог вручную."""
+    operatory = request.app.get("operatory")
+    if operatory is None:
+        return web.json_response({"error": "перехват недоступен"}, status=503)
+    try:
+        dialog_id = int(request.match_info["id"])
+    except (KeyError, ValueError):
+        return web.json_response({"error": "неверный id диалога"}, status=400)
+    try:
+        adres = await dialog_adres(request.app["fabrika"], dialog_id)
+    except Exception as e:  # noqa: BLE001
+        log_oshibka(f"Панель: возврат бота в диалог {dialog_id} не удался: {e}")
+        return web.json_response({"error": "база недоступна"}, status=503)
+    if adres is None:
+        return web.json_response({"error": "диалог не найден"}, status=404)
+    kod, chat_key = adres
+    await operatory.snyat(kod, chat_key)
+    logger.info("🙋 Панель: оператор вернул бота в чат %s:%s", kod, chat_key)
+    return web.json_response({"ok": True, "dialog_id": dialog_id})
 
 
 async def _dialog(request: web.Request) -> web.Response:
@@ -164,27 +210,31 @@ async def _dialog(request: web.Request) -> web.Response:
     return web.json_response({"dialog_id": dialog_id, "messages": soobshcheniya})
 
 
-def sozdat_prilozhenie(fabrika_sessiy, token: str, origin: str = "*") -> web.Application:
+def sozdat_prilozhenie(fabrika_sessiy, token: str, origin: str = "*",
+                       operatory=None) -> web.Application:
     """Собрать aiohttp-приложение. Отдельно от запуска — чтобы тесты поднимали
-    его на тестовом сервере без реальной БД."""
+    его на тестовом сервере без реальной БД. `operatory` (14.8) — управление
+    перехватом оператором (статус чата + кнопка возврата бота)."""
     app = web.Application(middlewares=[_cors, _avtorizaciya])
     app["fabrika"] = fabrika_sessiy
     app["token"] = token
     app["origin"] = origin
+    app["operatory"] = operatory
     app.router.add_get("/api/health", _health)
     app.router.add_get("/api/chats", _chaty)
     app.router.add_get("/api/dialog/{id}", _dialog)
+    app.router.add_post("/api/dialog/{id}/resume", _vernut_bota)
     return app
 
 
 async def zapustit(fabrika_sessiy, token: str, *, port: int, host: str = "0.0.0.0",
-                   origin: str = "*", stop=None) -> None:
+                   origin: str = "*", stop=None, operatory=None) -> None:
     """Поднять API и держать до сигнала остановки. Токен пуст — не поднимаемся
     (проверяется вызывающим, здесь на всякий случай тоже)."""
     if not token:
         logger.info("🧩 Панель-API: токен не задан — не поднимаю")
         return
-    app = sozdat_prilozhenie(fabrika_sessiy, token, origin)
+    app = sozdat_prilozhenie(fabrika_sessiy, token, origin, operatory)
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, host, port)

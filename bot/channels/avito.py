@@ -141,6 +141,19 @@ class AvitoAPI:
         uid = await self.user_id()
         return await self._post(f"/messenger/v1/accounts/{uid}/chats/{chat_id}/read", {})
 
+    async def soobshcheniya(self, chat_id: str, *, limit: int = 20) -> list[dict]:
+        """Последние сообщения чата — для детекции перехвата оператором (14.8).
+
+        Нужен лишь факт «последнее исходящее отправил не бот», поэтому берём
+        небольшое окно. Авито отдаёт список сообщений (в разных версиях — голым
+        массивом или под ключом `messages`), нормализуем к списку."""
+        uid = await self.user_id()
+        dannye = await self._get(
+            f"/messenger/v3/accounts/{uid}/chats/{chat_id}/messages/", {"limit": limit})
+        if isinstance(dannye, dict):
+            return dannye.get("messages", []) or []
+        return dannye or []
+
 
 def _telo_ili_oshibka(otvet: httpx.Response, put: str) -> dict:
     if otvet.status_code >= 400:
@@ -186,6 +199,19 @@ def izvlech_vhodyashchee(chat: dict) -> Vhodyashchee | None:
         tekst=content.get("text"),
         obyavlenie=obyavlenie,
     )
+
+
+def posledny_ishodyashchiy(soobshcheniya: list[dict]) -> dict | None:
+    """Самое свежее ИСХОДЯЩЕЕ сообщение чата (`direction == "out"`) или None.
+
+    По нему детектор перехвата (14.8) решает, отвечал ли последним бот или живой
+    менеджер. Порядок выдачи Авито не гарантирован — сортируем по времени, свежее
+    последним; `created` — unix-время сообщения."""
+    ishod = [m for m in soobshcheniya if isinstance(m, dict) and m.get("direction") == "out"]
+    if not ishod:
+        return None
+    ishod.sort(key=lambda m: m.get("created") or 0)
+    return ishod[-1]
 
 
 class Vidennye:
@@ -253,16 +279,22 @@ async def zapustit_nablyudenie(cfg: AvitoConfig, stop: asyncio.Event) -> None:
 # ── Режим ответа через ядро (подэтап 14.2) ───────────────────────────────────
 
 def _kanal_avito(api: AvitoAPI, chat_id: str, imya: str, *,
-                 zerkalo=None, avtor_id=None, zhurnal=None) -> Kanal:
+                 zerkalo=None, avtor_id=None, zhurnal=None,
+                 operatory=None, kod: str | None = None) -> Kanal:
     """Колбэки транспорта Авито для диспетчера. `pechataet=None` — у Авито
     индикатора набора нет, задержки очеловечивания работают молча.
 
     Если задано `zerkalo` (14.3), каждая отправленная реплика дублируется
     исходящим в amoCRM — так менеджер видит и ответы бота, а не только клиента.
     `zhurnal` (14.7) — та же реплика пишется в нашу БД для панели-виджета.
+    `operatory` (14.8) — id отправленной реплики запоминается, чтобы отличить
+    ответ бота от ответа живого менеджера при детекции перехвата.
     """
     async def otpravit(tekst: str) -> None:
-        await api.otpravit(chat_id, tekst)
+        rezultat = await api.otpravit(chat_id, tekst)
+        if operatory is not None and kod is not None:
+            await operatory.zapomnit_otpravlennoe(
+                kod, chat_id, (rezultat or {}).get("id"))
         if zerkalo is not None:
             await zerkalo.ishodyashchee(chat_id, tekst, avtor_id=avtor_id)
         if zhurnal is not None:
@@ -277,7 +309,7 @@ _PROSBA_TEKSTOM = ("Вложение вижу, но прочитать его н
 
 async def zapustit(kod: str, cfg: AvitoConfig, yadro, stop: asyncio.Event, *,
                    belyy_spisok: frozenset[str] | None = None, zerkalo=None,
-                   zhurnal=None) -> None:
+                   zhurnal=None, operatory=None) -> None:
     """Поллер в режиме ответа: входящее уходит в ядро, ответ шлётся в Авито.
 
     `belyy_spisok` — множество `chat_id`, которым РАЗРЕШЕНО отвечать. `None`
@@ -287,30 +319,60 @@ async def zapustit(kod: str, cfg: AvitoConfig, yadro, stop: asyncio.Event, *,
 
     `zerkalo` (14.3) — если задано, диалог дублируется в amoCRM (обе стороны).
     `zhurnal` (14.7) — если задано, лента (клиент+бот) пишется в нашу БД для панели.
+    `operatory` (14.8) — если задано, бот молчит в чатах, перехваченных менеджером.
     """
     async with AvitoAPI(cfg) as api:
         uid = await api.user_id()
-        logger.info("📡 Авито «%s» (%s): ответы через ядро, белый список: %s%s%s",
+        logger.info("📡 Авито «%s» (%s): ответы через ядро, белый список: %s%s%s%s",
                     kod, uid, ", ".join(sorted(belyy_spisok)) if belyy_spisok else "ВСЕ",
                     ", зеркало в amoCRM" if zerkalo is not None else "",
-                    ", журнал в БД" if zhurnal is not None else "")
+                    ", журнал в БД" if zhurnal is not None else "",
+                    ", перехват оператором" if operatory is not None else "")
         await cikl_pollinga(
             api, sdelat_obrabotchik(kod, api, yadro, belyy_spisok,
-                                    zerkalo=zerkalo, zhurnal=zhurnal), stop)
+                                    zerkalo=zerkalo, zhurnal=zhurnal,
+                                    operatory=operatory), stop)
+
+
+async def _operator_perehvatil(operatory, kod: str, api: AvitoAPI,
+                               chat_id: str) -> bool:
+    """Ведёт ли чат живой менеджер — бот должен молчать (14.8).
+
+    Флаг уже стоит → молчим. Иначе смотрим последнее исходящее в чате: если его
+    отправил не бот (нет в журнале реплик) — менеджер перехватил диалог, ставим
+    флаг. Сбой запроса за сообщениями не должен глушить бота: не удалось
+    проверить — считаем, что перехвата нет (флаг ставится только по факту)."""
+    if await operatory.vedet(kod, chat_id):
+        logger.info("🙋 Авито «%s»: чат %s ведёт оператор — бот молчит", kod, chat_id)
+        return True
+    try:
+        posl = posledny_ishodyashchiy(await api.soobshcheniya(chat_id))
+    except Exception as e:  # noqa: BLE001 — детекция не роняет обработку
+        log_oshibka(f"Оператор: детекция перехвата в чате {chat_id}: {e}")
+        return False
+    if posl is not None and not await operatory.bot_otpravlyal(
+            kod, chat_id, posl.get("id")):
+        await operatory.vzyal(kod, chat_id)
+        logger.info("🙋 Авито «%s»: в чате %s ответил живой менеджер — бот замолкает "
+                    "до ручного возврата из панели", kod, chat_id)
+        return True
+    return False
 
 
 def sdelat_obrabotchik(kod: str, api: AvitoAPI, yadro,
                        belyy_spisok: frozenset[str] | None, *, zerkalo=None,
-                       zhurnal=None):
-    """Обработчик входящего в режиме ответа: белый список → вложение → ядро.
+                       zhurnal=None, operatory=None):
+    """Обработчик входящего в режиме ответа: белый список → вложение → перехват → ядро.
 
     Вынесен из `zapustit`, чтобы фильтр белого списка, передачу объявления,
-    зеркало в amoCRM и журнал в БД можно было проверить без сети (на фейках).
+    зеркало в amoCRM, журнал в БД и перехват оператором можно было проверить без
+    сети (на фейках).
 
     Порядок для текста: сперва зеркалим входящее в amoCRM (менеджер видит вопрос
-    клиента даже если бот замолчит) и пишем в журнал, потом отдаём ядру; исходящие
-    бота зеркалит и журналит обёртка `_kanal_avito`. Вложение (текста нет) в amoCRM
-    пока не зеркалим, но в журнал кладём просьбу текстом — это ответ клиенту.
+    клиента даже если бот замолчит) и пишем в журнал, потом проверяем перехват
+    оператором и только затем отдаём ядру; исходящие бота зеркалит и журналит
+    обёртка `_kanal_avito`. Вложение (текста нет) в amoCRM пока не зеркалим, но
+    в журнал кладём просьбу текстом — это ответ клиенту.
     """
     async def obrabotchik(v: Vhodyashchee) -> None:
         if belyy_spisok is not None and v.chat_id not in belyy_spisok:
@@ -319,8 +381,13 @@ def sdelat_obrabotchik(kod: str, api: AvitoAPI, yadro,
             return
         imya = f"avito:{v.author_id}" if v.author_id else f"avito:{v.chat_id}"
         if v.tekst is None:
-            # Вложение без текста: отвечаем короткой просьбой напрямую, ядру
-            # передавать нечего (то же, что делает адаптер Telegram).
+            # Вложение без текста: под оператором молчим и здесь — не перебиваем
+            # менеджера дежурной просьбой; иначе отвечаем короткой просьбой
+            # напрямую, ядру передавать нечего (как адаптер Telegram).
+            if operatory is not None and await operatory.vedet(kod, v.chat_id):
+                logger.info("🙋 Авито «%s»: вложение в чате %s, но ведёт оператор — молчу",
+                            kod, v.chat_id)
+                return
             await api.otpravit(v.chat_id, _PROSBA_TEKSTOM)
             if zhurnal is not None:
                 await zhurnal.ishodyashchee(v.chat_id, _PROSBA_TEKSTOM)
@@ -331,12 +398,17 @@ def sdelat_obrabotchik(kod: str, api: AvitoAPI, yadro,
             await zerkalo.vhodyashchee(v.chat_id, v.msg_id, v.author_id, v.tekst)
         if zhurnal is not None:
             await zhurnal.vhodyashchee(v.chat_id, v.tekst, imya=imya)
+        # Перехват оператором (14.8): менеджер ответил вручную → бот молчит. Вопрос
+        # клиента уже зеркалирован и в журнале — менеджер его увидит в панели и amo.
+        if operatory is not None and await _operator_perehvatil(
+                operatory, kod, api, v.chat_id):
+            return
         # Объявление кладём ДО обработки: ядро подмешает его в промпт по ключу.
         yadro.zapomnit_obyavlenie(kod, v.chat_id, v.obyavlenie)
         yadro.obrabotat(kod, v.chat_id, v.tekst,
                         _kanal_avito(api, v.chat_id, imya,
                                      zerkalo=zerkalo, avtor_id=v.author_id,
-                                     zhurnal=zhurnal))
+                                     zhurnal=zhurnal, operatory=operatory, kod=kod))
 
     return obrabotchik
 

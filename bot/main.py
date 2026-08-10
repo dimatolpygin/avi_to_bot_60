@@ -60,12 +60,15 @@ def zhivye_avito(cfg: Config) -> list[str]:
     return [k for k, a in cfg.avito.items() if a.zapolnen]
 
 
-def _kanal_avito(kod: str, cfg: Config, yadro: Yadro, stop: asyncio.Event):
+def _kanal_avito(kod: str, cfg: Config, yadro: Yadro, stop: asyncio.Event,
+                 operatory=None):
     """Фабрика запуска поллера Авито по режиму `AVITO_REZHIM`.
 
     off сюда не доходит (отфильтрован раньше). nablyudenie — только лог,
     spisok — отвечаем чатам из белого списка, vse — отвечаем всем (боевой,
     14.5). Белый список общий на все аккаунты; на 14.2 в нём тестовый чат.
+    `operatory` (14.8) — перехват оператором: бот молчит в чате, где ответил
+    живой менеджер, пока его не вернут вручную из панели.
     """
     async def zapustit() -> None:
         from .channels import avito
@@ -89,9 +92,10 @@ def _kanal_avito(kod: str, cfg: Config, yadro: Yadro, stop: asyncio.Event):
                 logger.info("🪞 Авито «%s»: диалог зеркалируется в amoCRM%s", kod,
                             "" if cfg.amo_bot_ref_id else " (входящие; реплики бота — с 14.4)")
                 await avito.zapustit(kod, acc, yadro, stop, belyy_spisok=spisok,
-                                     zerkalo=z, zhurnal=zhurnal)
+                                     zerkalo=z, zhurnal=zhurnal, operatory=operatory)
             return
-        await avito.zapustit(kod, acc, yadro, stop, belyy_spisok=spisok, zhurnal=zhurnal)
+        await avito.zapustit(kod, acc, yadro, stop, belyy_spisok=spisok,
+                             zhurnal=zhurnal, operatory=operatory)
     return zapustit
 
 
@@ -156,12 +160,18 @@ async def main() -> None:
         yadro = sozdat_yadro(cfg, redis_client)
         await yadro.podgotovit(gotovit, fabrika_sessiy)
 
+        # Перехват оператором (14.8): общий на процесс, состояние в Redis. Один
+        # объект и для поллеров Авито (ставят флаг), и для панели-API (снимает).
+        from .operator import Operatory
+        operatory = Operatory(redis_client)
+
         _ustanovit_signaly(stop)
         tasks = [asyncio.create_task(
             _supervise(kod, _kanal_telegram(kod, cfg.telegram_tokeny[kod], yadro)), name=kod)
             for kod in zhivye]
         tasks += [asyncio.create_task(
-            _supervise(f"avito-{kod}", _kanal_avito(kod, cfg, yadro, stop)), name=f"avito-{kod}")
+            _supervise(f"avito-{kod}", _kanal_avito(kod, cfg, yadro, stop, operatory)),
+            name=f"avito-{kod}")
             for kod in avito_kody]
 
         # Живой каталог из Google-таблицы (этап 16): фоновый синк в БД раз в
@@ -201,7 +211,7 @@ async def main() -> None:
             tasks.append(asyncio.create_task(
                 _supervise("панель-API", lambda: panel_api.zapustit(
                     fabrika_sessiy, cfg.panel_api_token, port=cfg.panel_api_port,
-                    origin=cfg.panel_cors_origin, stop=stop)),
+                    origin=cfg.panel_cors_origin, stop=stop, operatory=operatory)),
                 name="панель-API"))
 
         if not tasks:
