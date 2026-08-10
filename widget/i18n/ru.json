@@ -7,6 +7,9 @@
   "left_menu": {
     "title": "SBAvito"
   },
+  "advanced": {
+    "title": "SBAvito — переписки ботов"
+  },
   "settings": {
     "api_base": "Адрес API (например https://bot-admin.online)",
     "api_token": "Токен доступа к API"

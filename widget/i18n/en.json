@@ -7,6 +7,9 @@
   "left_menu": {
     "title": "SBAvito"
   },
+  "advanced": {
+    "title": "SBAvito — bot conversations"
+  },
   "settings": {
     "api_base": "API address (e.g. https://bot-admin.online)",
     "api_token": "API access token"

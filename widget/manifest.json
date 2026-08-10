@@ -15,6 +15,12 @@
   },
   "locale": ["ru", "en"],
   "locations": ["settings", "advanced_settings"],
+  "advanced": {
+    "title": "advanced.title"
+  },
+  "tour": {
+    "is_tour": false
+  },
   "settings": {
     "api_base": {
       "name": "settings.api_base",
