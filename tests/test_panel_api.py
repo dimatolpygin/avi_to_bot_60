@@ -231,14 +231,39 @@ async def test_amojo_vebhuk_diag_bez_obrabotchika_vsegda_200():
         assert resp.status == 200 and (await resp.json())["ok"] is True
 
 
-async def test_amojo_vebhuk_phase2_podpis_neverna_403():
-    """Фаза 2 (обработчик задан) — строгая проверка: неверная подпись → 403."""
+async def test_amojo_vebhuk_phase2_podpis_neverna_200_bez_deystviya():
+    """Фаза 2: неверная подпись → всё равно 200 (менеджер не видит ошибку), но
+    обработчик НЕ зовём — реакция гейтится подписью, а не HTTP-кодом."""
+    zvali = []
+
+    async def obrabotchik(d):
+        zvali.append(d)
+
     telo = b'{"message": {}}'
-    app = _prilozhenie_amojo(obrabotchik=lambda d: None)
+    app = _prilozhenie_amojo(obrabotchik=obrabotchik)
     async with TestClient(TestServer(app)) as kl:
         resp = await kl.post("/amojo/chan_acc", data=telo,
                              headers={"X-Signature": "deadbeef"})
-        assert resp.status == 403
+        assert resp.status == 200
+    assert zvali == []
+
+
+async def test_amojo_vebhuk_phase2_hvostovoy_perevod_stroki_prinyat():
+    """amoJo подписывает тело без хвостового \\n, но шлёт с ним — подпись должна
+    сойтись, обработчик вызваться."""
+    zvali = []
+
+    async def obrabotchik(d):
+        zvali.append(d)
+
+    baza = json.dumps({"message": {"conversation": {"id": "skc"}}}).encode("utf-8")
+    sig = _podpis(baza, "sek")            # подпись над телом БЕЗ \n
+    telo = baza + b"\n"                    # а шлём С \n
+    app = _prilozhenie_amojo(obrabotchik=obrabotchik)
+    async with TestClient(TestServer(app)) as kl:
+        resp = await kl.post("/amojo/chan_acc", data=telo, headers={"X-Signature": sig})
+        assert resp.status == 200
+    assert len(zvali) == 1
 
 
 async def test_amojo_vebhuk_phase2_zovyot_obrabotchik_na_razobrannom():
@@ -269,13 +294,11 @@ async def test_amojo_vebhuk_phase2_sboy_obrabotchika_vsyo_ravno_200():
         assert resp.status == 200
 
 
-def test_podpis_amojo_prinimaet_kanonicheskuyu_shemu():
-    """Каноническая строка METHOD\\nMD5\\nCT\\nDate\\nPath — вторая валидная схема."""
-    telo = b'{"m":1}'
-    md5 = hashlib.md5(telo).hexdigest()
-    stroka = "\n".join(["POST", md5, "application/json", "Mon, 11 Aug 2026 00:00:00 GMT",
-                        "/amojo/scope"])
-    sig = hmac.new(b"sek", stroka.encode(), hashlib.sha1).hexdigest()
-    assert api.podpis_amojo_verna(telo, "sek", sig, content_type="application/json",
-                                  date="Mon, 11 Aug 2026 00:00:00 GMT",
-                                  put="/amojo/scope") is True
+def test_podpis_amojo_prinimaet_telo_s_hvostovym_nl():
+    """Подпись над телом без \\n должна проходить и для тела С хвостовым \\n
+    (реальная особенность amoJo)."""
+    baza = b'{"m":1}'
+    sig = _podpis(baza, "sek")
+    assert api.podpis_amojo_verna(baza + b"\n", "sek", sig) is True
+    assert api.podpis_amojo_verna(baza + b"\r\n", "sek", sig) is True
+    assert api.podpis_amojo_verna(baza, "sek", sig) is True

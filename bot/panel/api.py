@@ -168,18 +168,17 @@ def _sig_canonical(telo: bytes, secret: str, content_type: str, date: str,
                     hashlib.sha1).hexdigest()
 
 
-def podpis_amojo_verna(telo: bytes, secret: str, zagolovok: str | None, *,
-                       content_type: str = "application/json", date: str = "",
-                       put: str = "") -> bool:
-    """Верна ли X-Signature вебхука amoJo. Секрет канала — ключ HMAC-SHA1.
-    Принимаем ОБЕ известные схемы (сырое тело ИЛИ каноническая строка), т.к.
-    какая именно у вебхука — подтверждается живым прогоном (14.9-B). Пустой
-    секрет/заголовок → не пускаем."""
+def podpis_amojo_verna(telo: bytes, secret: str, zagolovok: str | None) -> bool:
+    """Верна ли X-Signature вебхука amoJo: HMAC-SHA1 (hex) секретом канала над
+    ТЕЛОМ. Схема подтверждена живым прогоном 14.9-B. ⚠️ amoJo ПОДПИСЫВАЕТ тело
+    без хвостового перевода строки, но ПЕРЕДАЁТ его с `\\n` в конце — поэтому
+    сверяем и сырое тело, и тело без хвостовых `\\r\\n` (иначе подпись не сходится
+    и менеджер видит «внутренняя ошибка»). Пустой секрет/заголовок → не пускаем."""
     if not secret or not zagolovok:
         return False
     dan = zagolovok.strip().lower()
     return (_sravnit_hex(_sig_raw(telo, secret), dan)
-            or _sravnit_hex(_sig_canonical(telo, secret, content_type, date, put), dan))
+            or _sravnit_hex(_sig_raw(telo.rstrip(b"\r\n"), secret), dan))
 
 
 def _diag_podpisi(telo: bytes, secret: str, poluchennaya: str | None,
@@ -191,6 +190,7 @@ def _diag_podpisi(telo: bytes, secret: str, poluchennaya: str | None,
     date = headers.get("Date", "")
     kand = {
         "raw_body": _sig_raw(telo, secret),
+        "raw_body_bez_nl": _sig_raw(telo.rstrip(b"\r\n"), secret),
         "canonical": _sig_canonical(telo, secret, ct, date, put),
     }
     dan = (poluchennaya or "").strip().lower()
@@ -205,15 +205,15 @@ def _diag_podpisi(telo: bytes, secret: str, poluchennaya: str | None,
 async def _amojo_vebhuk(request: web.Request) -> web.Response:
     """`POST /amojo/{scope_id}` — событие из amoCRM (менеджер написал в карточке).
 
-    Фаза 1 (обработчик НЕ задан) — диагностика: НЕ отклоняем по подписи, а
-    логируем сырое тело, заголовки и какая схема подписи совпала, чтобы снять с
-    живого аккаунта реальную форму вебхука и схему X-Signature (поле
-    `conversation.client_id` для маппинга + проверка на эхо наших импортов —
-    риск петли). Возвращаем 200, чтобы у менеджера не было «внутренней ошибки».
+    ВСЕГДА возвращает 200 — вебхук не должен показывать менеджеру «внутреннюю
+    ошибку», и amoJo по доке ждёт 200 (логику — в фоне). Реакция гейтится
+    подписью, а не HTTP-кодом: неверная подпись → просто игнор (лог), без действия.
 
-    Фаза 2 (обработчик задан) — строгая проверка подписи (обе известные схемы),
-    неверная → 403; затем разбор и обработчик. По доке канал обязан вернуть 200,
-    а логику делать в фоне; ошибка обработчика не срывает 200 (иначе ретраи)."""
+    Фаза 1 (обработчик НЕ задан) — диагностика: логируем сырое тело, заголовки и
+    какая схема подписи совпала (снять форму вебхука с живого аккаунта).
+    Фаза 2 (обработчик задан) — при ВЕРНОЙ подписи разбираем и зовём обработчик
+    (реплика менеджера → клиенту в Авито + флаг оператора); ошибка обработчика
+    не срывает 200."""
     telo = await request.read()
     scope_id = request.match_info.get("scope_id", "")
     secret = request.app.get("amojo_secret") or ""
@@ -222,12 +222,9 @@ async def _amojo_vebhuk(request: web.Request) -> web.Response:
         _diag_podpisi(telo, secret, request.headers.get("X-Signature"),
                       request.headers, request.path)
         return web.json_response({"ok": True})
-    if not podpis_amojo_verna(
-            telo, secret, request.headers.get("X-Signature"),
-            content_type=request.headers.get("Content-Type", "application/json"),
-            date=request.headers.get("Date", ""), put=request.path):
-        log_oshibka(f"amoJo вебхук (scope {scope_id}): подпись не сошлась — отклоняю")
-        return web.json_response({"error": "bad signature"}, status=403)
+    if not podpis_amojo_verna(telo, secret, request.headers.get("X-Signature")):
+        log_oshibka(f"amoJo вебхук (scope {scope_id}): подпись не сошлась — игнорирую")
+        return web.json_response({"ok": True})
     try:
         dannye = json.loads(telo.decode("utf-8"))
     except (ValueError, UnicodeDecodeError):

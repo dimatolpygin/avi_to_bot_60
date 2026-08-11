@@ -165,6 +165,28 @@ async def main() -> None:
         from .operator import Operatory
         operatory = Operatory(redis_client)
 
+        # Обработчик вебхука amoJo (14.9-B): реплика менеджера в карточке →
+        # клиенту в Авито + флаг оператора. Нужен, только когда есть публичный
+        # приёмник (panel_api_token), креды канала (amojo) и хотя бы один аккаунт
+        # Авито, куда слать. Держим по аккаунту отдельный AvitoAPI-«отправлялку»
+        # (поллер держит свой внутри задачи; этот — для инициативной отправки вне
+        # цикла) и закрываем на остановке.
+        amojo_obrabotchik = None
+        amo_apis: dict = {}
+        if cfg.panel_api_token and cfg.amojo is not None and avito_kody:
+            from .channels.avito import AvitoAPI
+            from .crm.vebhuk import PriyomAmo
+            from .zhurnal import Zhurnal
+            for kod in avito_kody:
+                api = AvitoAPI(cfg.avito[kod])
+                await api.__aenter__()
+                amo_apis[kod] = api
+            zhurnaly_amo = {kod: Zhurnal(fabrika_sessiy, kod, "avito")
+                            for kod in avito_kody} if fabrika_sessiy else {}
+            amojo_obrabotchik = PriyomAmo(amo_apis, operatory, zhurnaly=zhurnaly_amo)
+            logger.info("📩 Вебхук amoJo активен: реплика менеджера → клиенту в Авито "
+                        "(%s) + перехват из amoCRM", ", ".join(avito_kody))
+
         _ustanovit_signaly(stop)
         tasks = [asyncio.create_task(
             _supervise(kod, _kanal_telegram(kod, cfg.telegram_tokeny[kod], yadro)), name=kod)
@@ -218,7 +240,7 @@ async def main() -> None:
                 _supervise("панель-API", lambda: panel_api.zapustit(
                     fabrika_sessiy, cfg.panel_api_token, port=cfg.panel_api_port,
                     origin=cfg.panel_cors_origin, stop=stop, operatory=operatory,
-                    amojo_secret=amojo_secret)),
+                    amojo_secret=amojo_secret, amojo_obrabotchik=amojo_obrabotchik)),
                 name="панель-API"))
 
         if not tasks:
@@ -242,6 +264,11 @@ async def main() -> None:
             # Гасим недоговорённые диалоги: незаконченный ответ лучше оборвать,
             # чем оставить висеть задачу при закрытых соединениях.
             await yadro.ostanovit()
+        for api in amo_apis.values():   # «отправлялки» вебхука amoJo (14.9-B)
+            try:
+                await api.__aexit__(None, None, None)
+            except Exception:  # noqa: BLE001
+                pass
         await cache.zakryt(redis_client)
         await db.zakryt(engine)
         logger.info("🛑 Остановлен.")
