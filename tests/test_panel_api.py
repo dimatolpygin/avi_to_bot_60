@@ -221,24 +221,27 @@ def _prilozhenie_amojo(secret="sek", obrabotchik=None):
                                   amojo_secret=secret, amojo_obrabotchik=obrabotchik)
 
 
-async def test_amojo_vebhuk_bez_tokena_no_s_podpisyu_200():
-    """Вебхук не требует bearer-токен панели — только верную подпись."""
+async def test_amojo_vebhuk_diag_bez_obrabotchika_vsegda_200():
+    """Фаза 1 (обработчик не задан) — диагностика: 200 даже без верной подписи
+    (учимся на реальном теле, у менеджера нет «внутренней ошибки»)."""
     telo = json.dumps({"message": {"message": {"text": "привет"}}}).encode("utf-8")
     async with TestClient(TestServer(_prilozhenie_amojo())) as kl:
         resp = await kl.post("/amojo/chan_acc", data=telo,
-                             headers={"X-Signature": _podpis(telo, "sek")})
+                             headers={"X-Signature": "чтоугодно"})
         assert resp.status == 200 and (await resp.json())["ok"] is True
 
 
-async def test_amojo_vebhuk_podpis_neverna_403():
+async def test_amojo_vebhuk_phase2_podpis_neverna_403():
+    """Фаза 2 (обработчик задан) — строгая проверка: неверная подпись → 403."""
     telo = b'{"message": {}}'
-    async with TestClient(TestServer(_prilozhenie_amojo())) as kl:
+    app = _prilozhenie_amojo(obrabotchik=lambda d: None)
+    async with TestClient(TestServer(app)) as kl:
         resp = await kl.post("/amojo/chan_acc", data=telo,
                              headers={"X-Signature": "deadbeef"})
         assert resp.status == 403
 
 
-async def test_amojo_vebhuk_zovyot_obrabotchik_na_razobrannom():
+async def test_amojo_vebhuk_phase2_zovyot_obrabotchik_na_razobrannom():
     poluchennoe = []
 
     async def obrabotchik(dannye):
@@ -253,7 +256,7 @@ async def test_amojo_vebhuk_zovyot_obrabotchik_na_razobrannom():
     assert poluchennoe == [{"message": {"conversation": {"id": "skc-1"}}}]
 
 
-async def test_amojo_vebhuk_sboy_obrabotchika_vsyo_ravno_200():
+async def test_amojo_vebhuk_phase2_sboy_obrabotchika_vsyo_ravno_200():
     """Ошибка бизнес-логики не должна срывать 200 (иначе amoJo ретраит)."""
     async def obrabotchik(_dannye):
         raise RuntimeError("бах")
@@ -264,3 +267,15 @@ async def test_amojo_vebhuk_sboy_obrabotchika_vsyo_ravno_200():
         resp = await kl.post("/amojo/chan_acc", data=telo,
                              headers={"X-Signature": _podpis(telo, "sek")})
         assert resp.status == 200
+
+
+def test_podpis_amojo_prinimaet_kanonicheskuyu_shemu():
+    """Каноническая строка METHOD\\nMD5\\nCT\\nDate\\nPath — вторая валидная схема."""
+    telo = b'{"m":1}'
+    md5 = hashlib.md5(telo).hexdigest()
+    stroka = "\n".join(["POST", md5, "application/json", "Mon, 11 Aug 2026 00:00:00 GMT",
+                        "/amojo/scope"])
+    sig = hmac.new(b"sek", stroka.encode(), hashlib.sha1).hexdigest()
+    assert api.podpis_amojo_verna(telo, "sek", sig, content_type="application/json",
+                                  date="Mon, 11 Aug 2026 00:00:00 GMT",
+                                  put="/amojo/scope") is True

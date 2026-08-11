@@ -142,29 +142,90 @@ async def _avtorizaciya(request: web.Request, handler):
 
 # ── Вебхук amoJo (amo → клиент, 14.9-B) ──────────────────────────────────────
 
-def podpis_amojo_verna(telo: bytes, secret: str, zagolovok: str | None) -> bool:
-    """X-Signature amoCRM Chat API: HMAC-SHA1 (hex, нижний регистр) над СЫРЫМ
-    телом запроса, ключ — секрет канала. Пустой секрет/заголовок → не пускаем."""
+def _sravnit_hex(nasha: str, dan: str) -> bool:
+    """Безопасное сравнение hex-подписей: `hmac.compare_digest` бросает на
+    не-ASCII, а присланный заголовок может быть мусором — тогда просто «не
+    совпало», а не падение сервера."""
+    try:
+        return hmac.compare_digest(nasha, dan)
+    except (TypeError, ValueError):
+        return False
+
+
+def _sig_raw(telo: bytes, secret: str) -> str:
+    """HMAC-SHA1 (hex, lower) над СЫРЫМ телом — простейшая схема."""
+    return hmac.new(secret.encode("utf-8"), telo, hashlib.sha1).hexdigest()
+
+
+def _sig_canonical(telo: bytes, secret: str, content_type: str, date: str,
+                   put: str) -> str:
+    """HMAC-SHA1 над канонической строкой запроса amoCRM Chat API
+    `METHOD\\nContent-MD5\\nContent-Type\\nDate\\nPath` (Content-MD5 = md5 тела).
+    Той же схемой подписываются ИСХОДЯЩИЕ запросы к amojo (см. crm/amojo)."""
+    md5 = hashlib.md5(telo).hexdigest()
+    stroka = "\n".join(["POST", md5, content_type, date, put])
+    return hmac.new(secret.encode("utf-8"), stroka.encode("utf-8"),
+                    hashlib.sha1).hexdigest()
+
+
+def podpis_amojo_verna(telo: bytes, secret: str, zagolovok: str | None, *,
+                       content_type: str = "application/json", date: str = "",
+                       put: str = "") -> bool:
+    """Верна ли X-Signature вебхука amoJo. Секрет канала — ключ HMAC-SHA1.
+    Принимаем ОБЕ известные схемы (сырое тело ИЛИ каноническая строка), т.к.
+    какая именно у вебхука — подтверждается живым прогоном (14.9-B). Пустой
+    секрет/заголовок → не пускаем."""
     if not secret or not zagolovok:
         return False
-    nasha = hmac.new(secret.encode("utf-8"), telo, hashlib.sha1).hexdigest()
-    return hmac.compare_digest(nasha, zagolovok.strip().lower())
+    dan = zagolovok.strip().lower()
+    return (_sravnit_hex(_sig_raw(telo, secret), dan)
+            or _sravnit_hex(_sig_canonical(telo, secret, content_type, date, put), dan))
+
+
+def _diag_podpisi(telo: bytes, secret: str, poluchennaya: str | None,
+                  headers, put: str) -> None:
+    """Диагностика 14.9-B: печатает сырое тело, заголовки и КАКАЯ схема подписи
+    совпала с присланной. Нужен один живой вебхук, чтобы зафиксировать схему и
+    реальную форму тела (поле `conversation.client_id`, эхо наших импортов)."""
+    ct = headers.get("Content-Type", "application/json")
+    date = headers.get("Date", "")
+    kand = {
+        "raw_body": _sig_raw(telo, secret),
+        "canonical": _sig_canonical(telo, secret, ct, date, put),
+    }
+    dan = (poluchennaya or "").strip().lower()
+    sovpalo = [imya for imya, v in kand.items() if _sravnit_hex(v, dan)]
+    logger.info("🔬 amoJo диаг: X-Signature=%s Date=%r Content-Type=%r Content-MD5=%r",
+                poluchennaya, date, ct, headers.get("Content-MD5"))
+    logger.info("🔬 amoJo диаг: схема подписи совпала: %s (кандидаты: %s)",
+                sovpalo or "НИ ОДНА", kand)
+    logger.info("🔬 amoJo диаг: СЫРОЕ тело: %s", telo.decode("utf-8", "replace")[:3000])
 
 
 async def _amojo_vebhuk(request: web.Request) -> web.Response:
     """`POST /amojo/{scope_id}` — событие из amoCRM (менеджер написал в карточке).
 
-    Порядок: проверяем подпись СЫРОГО тела → логируем → отдаём обработчику в
-    фоне логики. По доке Chat API канал обязан вернуть 200, а бизнес-логику
-    делать асинхронно; ошибки обработчика не должны срывать 200 (иначе amoJo
-    будет ретраить). Пока обработчик не задан (диагностическая фаза 14.9-B) —
-    только логируем сырое тело, чтобы снять реальную форму вебхука с живого
-    аккаунта (нужно поле `conversation.client_id` и проверка на эхо наших же
-    импортов — риск петли)."""
+    Фаза 1 (обработчик НЕ задан) — диагностика: НЕ отклоняем по подписи, а
+    логируем сырое тело, заголовки и какая схема подписи совпала, чтобы снять с
+    живого аккаунта реальную форму вебхука и схему X-Signature (поле
+    `conversation.client_id` для маппинга + проверка на эхо наших импортов —
+    риск петли). Возвращаем 200, чтобы у менеджера не было «внутренней ошибки».
+
+    Фаза 2 (обработчик задан) — строгая проверка подписи (обе известные схемы),
+    неверная → 403; затем разбор и обработчик. По доке канал обязан вернуть 200,
+    а логику делать в фоне; ошибка обработчика не срывает 200 (иначе ретраи)."""
     telo = await request.read()
     scope_id = request.match_info.get("scope_id", "")
-    if not podpis_amojo_verna(telo, request.app.get("amojo_secret") or "",
-                              request.headers.get("X-Signature")):
+    secret = request.app.get("amojo_secret") or ""
+    obrabotchik = request.app.get("amojo_obrabotchik")
+    if obrabotchik is None:
+        _diag_podpisi(telo, secret, request.headers.get("X-Signature"),
+                      request.headers, request.path)
+        return web.json_response({"ok": True})
+    if not podpis_amojo_verna(
+            telo, secret, request.headers.get("X-Signature"),
+            content_type=request.headers.get("Content-Type", "application/json"),
+            date=request.headers.get("Date", ""), put=request.path):
         log_oshibka(f"amoJo вебхук (scope {scope_id}): подпись не сошлась — отклоняю")
         return web.json_response({"error": "bad signature"}, status=403)
     try:
@@ -173,8 +234,7 @@ async def _amojo_vebhuk(request: web.Request) -> web.Response:
         dannye = None
     logger.info("📥 amoJo вебхук (scope %s): %s", scope_id,
                 telo.decode("utf-8", "replace")[:2000])
-    obrabotchik = request.app.get("amojo_obrabotchik")
-    if obrabotchik is not None and dannye is not None:
+    if dannye is not None:
         try:
             await obrabotchik(dannye)
         except Exception as e:  # noqa: BLE001 — 200 отдаём всегда, иначе ретраи
