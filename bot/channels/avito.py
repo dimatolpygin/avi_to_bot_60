@@ -399,6 +399,9 @@ async def _operator_perehvatil(operatory, kod: str, api: AvitoAPI,
     СЛЕДУЮЩЕЕ чужое. Иначе на деплое бот замолкал бы во всех живых чатах разом
     (поймано на первом же прогоне 10.08)."""
     if await operatory.vedet(kod, chat_id):
+        # Контакт клиента продлевает перехват: отсчёт 3 суток до авто-возврата
+        # бота идёт от ПОСЛЕДНЕГО сообщения, а не от момента перехвата.
+        await operatory.prodlit(kod, chat_id)
         logger.info("🙋 Авито «%s»: чат %s ведёт оператор — бот молчит", kod, chat_id)
         return True
     try:
@@ -454,8 +457,10 @@ def sdelat_obrabotchik(kod: str, api: AvitoAPI, yadro,
             if zhurnal is not None:
                 await zhurnal.vhodyashchee(
                     v.chat_id, _marker_vlozheniya(v.vlozhenie), imya=imya)
-            # Под оператором не перебиваем менеджера дежурной просьбой.
+            # Под оператором не перебиваем менеджера дежурной просьбой; вложение
+            # клиента — тоже контакт, продлеваем перехват до авто-возврата.
             if operatory is not None and await operatory.vedet(kod, v.chat_id):
+                await operatory.prodlit(kod, v.chat_id)
                 logger.info("🙋 Авито «%s»: вложение в чате %s, но ведёт оператор — молчу",
                             kod, v.chat_id)
                 return

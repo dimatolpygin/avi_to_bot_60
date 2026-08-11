@@ -252,9 +252,13 @@ class _FakeOperatory:
     def __init__(self, vedet=False):
         self._vedet = vedet
         self.zapomneno = []
+        self.prodleno = []
 
     async def vedet(self, kod, chat):
         return self._vedet
+
+    async def prodlit(self, kod, chat):
+        self.prodleno.append((kod, chat))
 
     async def zapomnit_otpravlennoe(self, kod, chat, msg_id):
         self.zapomneno.append((chat, msg_id))

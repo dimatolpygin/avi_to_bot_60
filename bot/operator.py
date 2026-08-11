@@ -7,22 +7,32 @@
 реплик, которые отправил сам бот; чужое исходящее = менеджер перехватил диалог →
 ставим флаг, и в этом чате бот замолкает.
 
-Политика возврата (решение заказчика): бот молчит, пока менеджер НЕ вернёт его
-вручную — кнопкой «вернуть бота» в панели (снимает флаг). Авто-возврата по таймеру
-нет: взял диалог человек — он и решает, когда отдать обратно.
+Политика возврата (решение заказчика 11.08, сменило прежнее «только вручную»): бот
+молчит, пока в чате идёт разговор, и **сам включается после 3 суток тишины** — если
+последний контакт (сообщение клиента ИЛИ ответ менеджера) был больше 3 дней назад,
+диалог считается остывшим и боту снова можно отвечать. Ручное снятие остаётся —
+кнопка «вернуть бота» в панели (`snyat`). Менеджеры сидят в amoCRM и Авито, в панель
+не ходят, поэтому авто-возврат и нужен: иначе перехваченный чат заглох бы навсегда.
+
+Реализовано через TTL флага: `vzyal` ставит флаг на 3 дня, `prodlit` продлевает его
+на каждый новый контакт (поллер зовёт при входящем под оператором, вебхук amoJo —
+через повторный `vzyal`). Нет активности 3 дня → флаг истёк в Redis → бот вернулся.
 
 Состояние — в Redis (переживает рестарт, общее для поллера и панели-API: они живут
 в одном процессе, но перезапускаются порознь). Redis лёг — деградируем мягко: бот
 продолжает отвечать. Моргание кеша не должно ни заморозить бота навсегда, ни
-глушить его ложно; поднятый флаг лежит в Redis без TTL и переживает такой сбой.
+глушить его ложно.
 """
 from __future__ import annotations
+
+import time
 
 from .logger import log_oshibka
 
 _PREFIKS_FLAG = "sbavito:operator"       # :{kod}:{chat} → "1", пока ведёт оператор
 _PREFIKS_BOT = "sbavito:botmsg"          # :{kod}:{chat} → список id реплик бота
 _HRANIT_ID = 50                          # сколько последних id реплик бота помним
+TTL_VOZVRATA_S = 3 * 24 * 3600           # 3 суток тишины → бот включается сам
 
 
 def _dekod(x) -> str:
@@ -33,12 +43,15 @@ class Operatory:
     """Флаг «чат ведёт живой оператор» + журнал id реплик бота (для детекции).
 
     `redis=None` — работаем на структурах в памяти процесса (тесты/без кеша):
-    флаг всё равно действует в пределах жизни процесса.
+    флаг всё равно действует в пределах жизни процесса. `ttl_s` — сколько тишины
+    держит перехват до авто-возврата бота; `chasy` — источник времени (для тестов).
     """
 
-    def __init__(self, redis=None):
+    def __init__(self, redis=None, *, ttl_s: int = TTL_VOZVRATA_S, chasy=None):
         self._redis = redis
-        self._flagi: set[str] = set()                 # фолбэк без Redis
+        self._ttl = ttl_s
+        self._chasy = chasy or time.time
+        self._flagi: dict[str, float] = {}            # фолбэк без Redis: key → истечёт в
         self._otpravleno: dict[str, list[str]] = {}
 
     @staticmethod
@@ -52,21 +65,35 @@ class Operatory:
     # ── Флаг перехвата ───────────────────────────────────────────────────────
 
     async def vzyal(self, kod, chat) -> None:
-        """Оператор перехватил чат: бот в нём замолкает."""
+        """Оператор перехватил чат: бот замолкает. Флаг живёт `ttl` (3 суток);
+        новый контакт продлевает его через `prodlit`/повторный `vzyal`."""
         klyuch = self._kl_flag(kod, chat)
         if self._redis is None:
-            self._flagi.add(klyuch)
+            self._flagi[klyuch] = self._chasy() + self._ttl
             return
         try:
-            await self._redis.set(klyuch, "1")
+            await self._redis.set(klyuch, "1", ex=self._ttl)
         except Exception as e:  # noqa: BLE001 — сбой кеша не роняет диалог
             log_oshibka(f"Оператор: не поставил флаг {klyuch}: {e}")
+
+    async def prodlit(self, kod, chat) -> None:
+        """Продлить перехват ещё на `ttl` от нового контакта (сообщение клиента
+        или менеджера). Флага нет — ничего не делаем (не «оживляем» снятый)."""
+        klyuch = self._kl_flag(kod, chat)
+        if self._redis is None:
+            if klyuch in self._flagi:
+                self._flagi[klyuch] = self._chasy() + self._ttl
+            return
+        try:
+            await self._redis.expire(klyuch, self._ttl)  # нет ключа → no-op
+        except Exception as e:  # noqa: BLE001
+            log_oshibka(f"Оператор: не продлил флаг {klyuch}: {e}")
 
     async def snyat(self, kod, chat) -> None:
         """Вернуть бота в чат (кнопка «вернуть бота» в панели)."""
         klyuch = self._kl_flag(kod, chat)
         if self._redis is None:
-            self._flagi.discard(klyuch)
+            self._flagi.pop(klyuch, None)
             return
         try:
             await self._redis.delete(klyuch)
@@ -74,10 +101,17 @@ class Operatory:
             log_oshibka(f"Оператор: не снял флаг {klyuch}: {e}")
 
     async def vedet(self, kod, chat) -> bool:
-        """Ведёт ли чат оператор (бот должен молчать)."""
+        """Ведёт ли чат оператор (бот должен молчать). В Redis истёкший TTL сам
+        убирает флаг; в памяти проверяем срок вручную."""
         klyuch = self._kl_flag(kod, chat)
         if self._redis is None:
-            return klyuch in self._flagi
+            srok = self._flagi.get(klyuch)
+            if srok is None:
+                return False
+            if self._chasy() >= srok:
+                self._flagi.pop(klyuch, None)     # истёк — бот вернулся
+                return False
+            return True
         try:
             return bool(await self._redis.get(klyuch))
         except Exception as e:  # noqa: BLE001 — кеш моргнул: не морозим бота

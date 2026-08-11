@@ -23,20 +23,26 @@ class FakeRedis:
     def __init__(self, padat: bool = False):
         self.kv: dict[str, str] = {}
         self.lists: dict[str, list[str]] = {}
+        self.ex: dict[str, int | None] = {}
         self.padat = padat
 
     def _p(self):
         if self.padat:
             raise ConnectionError("Redis недоступен")
 
-    async def set(self, k, v):
-        self._p(); self.kv[k] = v
+    async def set(self, k, v, ex=None):
+        self._p(); self.kv[k] = v; self.ex[k] = ex
 
     async def get(self, k):
         self._p(); return self.kv.get(k)
 
+    async def expire(self, k, ttl):
+        self._p()
+        if k in self.kv:
+            self.ex[k] = ttl
+
     async def delete(self, k):
-        self._p(); self.kv.pop(k, None); self.lists.pop(k, None)
+        self._p(); self.kv.pop(k, None); self.lists.pop(k, None); self.ex.pop(k, None)
 
     async def rpush(self, k, v):
         self._p(); self.lists.setdefault(k, []).append(v)
@@ -110,6 +116,68 @@ async def test_flag_raznyh_akkauntov_ne_smeshivayutsya():
     op = Operatory(FakeRedis())
     await op.vzyal("saunamart", "c1")
     assert await op.vedet("sbsauna", "c1") is False   # тот же chat, другой аккаунт
+
+
+# ── Авто-возврат бота по 3-суточной тишине (решение 11.08) ────────────────────
+
+class _Chasy:
+    def __init__(self, t: float = 1000.0):
+        self.t = t
+
+    def __call__(self):
+        return self.t
+
+
+async def test_ttl_avtovozvrat_v_pamyati():
+    """Перехват сам истекает после ttl тишины — бот возвращается без панели."""
+    ch = _Chasy()
+    op = Operatory(None, ttl_s=100, chasy=ch)
+    await op.vzyal("saunamart", "c1")
+    assert await op.vedet("saunamart", "c1") is True
+    ch.t += 99
+    assert await op.vedet("saunamart", "c1") is True      # ещё держит
+    ch.t += 2                                             # прошло 101 > 100
+    assert await op.vedet("saunamart", "c1") is False     # бот вернулся сам
+
+
+async def test_prodlit_otodvigaet_vozvrat():
+    """Новый контакт продлевает перехват: отсчёт идёт от последнего сообщения."""
+    ch = _Chasy()
+    op = Operatory(None, ttl_s=100, chasy=ch)
+    await op.vzyal("saunamart", "c1")
+    ch.t += 90
+    await op.prodlit("saunamart", "c1")                   # контакт на 90-й секунде
+    ch.t += 90                                            # 90 после продления < 100
+    assert await op.vedet("saunamart", "c1") is True
+    ch.t += 20                                            # 110 от продления > 100
+    assert await op.vedet("saunamart", "c1") is False
+
+
+async def test_prodlit_ne_ozhivlyaet_snyatyy():
+    op = Operatory(None, ttl_s=100)
+    await op.prodlit("saunamart", "c1")                   # флага нет
+    assert await op.vedet("saunamart", "c1") is False
+
+
+async def test_vzyal_stavit_ttl_v_redis():
+    r = FakeRedis()
+    await Operatory(r, ttl_s=259200).vzyal("saunamart", "c1")
+    assert r.ex["sbavito:operator:saunamart:c1"] == 259200
+
+
+async def test_prodlit_expire_v_redis():
+    r = FakeRedis()
+    op = Operatory(r, ttl_s=100)
+    await op.vzyal("saunamart", "c1")
+    r.ex["sbavito:operator:saunamart:c1"] = 5             # как будто TTL утёк
+    await op.prodlit("saunamart", "c1")
+    assert r.ex["sbavito:operator:saunamart:c1"] == 100   # заново продлён
+
+
+async def test_prodlit_bez_flaga_redis_noop():
+    r = FakeRedis()
+    await Operatory(r, ttl_s=100).prodlit("saunamart", "c1")   # ключа нет
+    assert "sbavito:operator:saunamart:c1" not in r.ex
 
 
 async def test_sboy_redis_ne_morozit_bota():
