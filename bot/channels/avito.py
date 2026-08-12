@@ -107,6 +107,13 @@ class AvitoAPI:
         otvet = await self._client.post(put, json=telo, headers=await self._zagolovki())
         return _telo_ili_oshibka(otvet, put)
 
+    async def _post_files(self, put: str, files: dict) -> dict:
+        """POST multipart/form-data (для загрузки картинки). `files` — как у httpx:
+        {поле: (имя, байты, content_type)}."""
+        assert self._client is not None
+        otvet = await self._client.post(put, files=files, headers=await self._zagolovki())
+        return _telo_ili_oshibka(otvet, put)
+
     # — данные —
 
     async def user_id(self) -> int:
@@ -134,6 +141,29 @@ class AvitoAPI:
         return await self._post(
             f"/messenger/v1/accounts/{uid}/chats/{chat_id}/messages",
             {"message": {"text": tekst}, "type": "text"})
+
+    async def zagruzit_kartinku(self, dannye: bytes, *, imya: str = "image.jpg",
+                                tip: str = "image/jpeg") -> str:
+        """Загрузить картинку в Авито → `image_id` (14.9, исходящие вложения).
+
+        Отправка картинки в Авито двухшаговая: сперва upload, потом
+        `otpravit_kartinku` по полученному id. Поле формы — `uploadfile[]`; ответ
+        `{"<image_id>": {размеры…}}`, где id — единственный ключ верхнего уровня."""
+        uid = await self.user_id()
+        otvet = await self._post_files(
+            f"/messenger/v1/accounts/{uid}/uploadImages",
+            {"uploadfile[]": (imya, dannye, tip)})
+        if not isinstance(otvet, dict) or not otvet:
+            raise OshibkaAvito(f"uploadImages вернул пусто/не словарь: {otvet!r}")
+        return next(iter(otvet))
+
+    async def otpravit_kartinku(self, chat_id: str, image_id: str) -> dict:
+        """Отправить ранее загруженную картинку в чат. ⚠️ Внешнее действие —
+        доходит до живого клиента."""
+        uid = await self.user_id()
+        return await self._post(
+            f"/messenger/v1/accounts/{uid}/chats/{chat_id}/messages/image",
+            {"image_id": image_id})
 
     async def otmetit_prochitannym(self, chat_id: str) -> dict:
         """Пометить чат прочитанным. На поллинге НЕ обязателен и по умолчанию не

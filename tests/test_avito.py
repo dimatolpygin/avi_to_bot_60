@@ -170,6 +170,63 @@ async def test_otpravit_shlet_pravilnoe_telo():
     assert zahvat["uid_v_puti"] is True                         # user_id из cfg попал в путь
 
 
+# ── Исходящие картинки (14.9): upload → messages/image ───────────────────────
+
+async def test_zagruzit_kartinku_beret_image_id_iz_klyucha():
+    zahvat = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/token":
+            return httpx.Response(200, json={"access_token": "T1", "expires_in": 86400})
+        if request.url.path.endswith("/uploadImages"):
+            zahvat["ctype"] = request.headers.get("content-type", "")
+            zahvat["uid_v_puti"] = "23598618" in request.url.path
+            # Ответ Авито: {"<image_id>": {размеры}} — id это ключ верхнего уровня.
+            return httpx.Response(200, json={"98765.abcdef": {
+                "1280x960": "https://cdn/big.jpg", "32x32": "https://cdn/s.jpg"}})
+        return httpx.Response(404)
+
+    async with _api_s_transportom(handler) as api:
+        image_id = await api.zagruzit_kartinku(b"\xff\xd8jpegbytes", imya="ph.jpg",
+                                               tip="image/jpeg")
+
+    assert image_id == "98765.abcdef"
+    assert zahvat["uid_v_puti"] is True
+    assert zahvat["ctype"].startswith("multipart/form-data")   # ушло как форма
+
+
+async def test_zagruzit_kartinku_pustoy_otvet_padaet():
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/token":
+            return httpx.Response(200, json={"access_token": "T1", "expires_in": 86400})
+        return httpx.Response(200, json={})       # пусто — image_id взять неоткуда
+
+    async with _api_s_transportom(handler) as api:
+        with pytest.raises(OshibkaAvito):
+            await api.zagruzit_kartinku(b"x")
+
+
+async def test_otpravit_kartinku_shlet_image_id():
+    zahvat = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/token":
+            return httpx.Response(200, json={"access_token": "T1", "expires_in": 86400})
+        if request.url.path.endswith("/messages/image"):
+            import json
+            zahvat.update(json.loads(request.content))
+            zahvat["uid_v_puti"] = "23598618" in request.url.path
+            return httpx.Response(200, json={"id": "img-msg-1", "type": "image"})
+        return httpx.Response(404)
+
+    async with _api_s_transportom(handler) as api:
+        otvet = await api.otpravit_kartinku("c1", "98765.abcdef")
+
+    assert otvet["id"] == "img-msg-1"
+    assert zahvat["image_id"] == "98765.abcdef"
+    assert zahvat["uid_v_puti"] is True
+
+
 # ── Цикл поллинга ────────────────────────────────────────────────────────────
 
 async def test_cikl_zovet_obrabotchik_odin_raz_na_soobshchenie():

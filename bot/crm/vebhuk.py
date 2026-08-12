@@ -14,17 +14,34 @@ amoJo шлёт событие `message`, когда живой менеджер 
   * отправляем текст менеджера клиенту в Авито («написать первым» — вне цикла
     поллинга) и пишем реплику в журнал панели.
 
-Вложения менеджера (media) пока НЕ пересылаем — это отдельный узел «исходящие
-вложения»; флаг оператора всё равно ставим (менеджер взял диалог), а в лог кладём
-пометку. Отправка id ушедшей реплики в журнал бота (`zapomnit_otpravlennoe`) держит
-детекцию 14.8 честной: наш же ретранслированный текст не примут потом за «чужое
-исходящее» после ручного возврата бота.
+Вложения менеджера: **картинку пересылаем клиенту в Авито** (14.9, исходящие
+вложения) — качаем media по публичному URL амоджо и шлём двухшаговой отправкой
+Авито (upload → messages/image). Файл/голос/видео Авito в чат не отправляет (его
+API умеет только текст и картинку), поэтому по ним лишь ставим флаг оператора и
+логируем. Отправка id ушедшей реплики в журнал бота (`zapomnit_otpravlennoe`)
+держит детекцию 14.8 честной: наш же ретранслированный текст/фото не примут потом
+за «чужое исходящее» после возврата бота.
 """
 from __future__ import annotations
+
+import httpx
 
 from ..logger import log_oshibka, logger
 
 _DEDUP_MAX = 500          # сколько id последних обработанных вебхуков помним в памяти
+_TAYMAUT_SKACHIVANIYA_S = 30.0
+
+
+async def _skachat_url(url: str) -> tuple[bytes, str]:
+    """Скачать файл по публичному URL (media из вебхука amoJo) → (байты, тип).
+
+    Отдельный клиент: у amoJo своё файловое хранилище, а не api.avito.ru. Редиректы
+    амоджо-хостинга разрешаем. Сбой пробрасываем — обработчик его ловит и логирует."""
+    async with httpx.AsyncClient(timeout=_TAYMAUT_SKACHIVANIYA_S,
+                                 follow_redirects=True) as kl:
+        r = await kl.get(url)
+        r.raise_for_status()
+        return r.content, r.headers.get("content-type", "")
 
 
 class PriyomAmo:
@@ -35,10 +52,12 @@ class PriyomAmo:
     Процесс один (панель-API и поллеры в нём же), поэтому дедуп по id держим в
     памяти — этого хватает от повторной доставки того же вебхука."""
 
-    def __init__(self, apis: dict, operatory, *, zhurnaly: dict | None = None):
+    def __init__(self, apis: dict, operatory, *, zhurnaly: dict | None = None,
+                 skachat=None):
         self._apis = apis
         self._operatory = operatory
         self._zhurnaly = zhurnaly or {}
+        self._skachat = skachat or _skachat_url   # inject для тестов без сети
         self._vidennye: list[str] = []
         self._vidennye_set: set[str] = set()
 
@@ -81,9 +100,15 @@ class PriyomAmo:
         imya = sender.get("name") or "менеджер"
         tip = inner.get("type") or "text"
         tekst = (inner.get("text") or "").strip()
+        if tip == "picture" and (inner.get("media") or "").strip():
+            await self._pereslat_kartinku(api, kod, chat_id, imya, inner)
+            return
         if tip != "text" or not tekst:
+            # Файл/голос/видео Авито в чат не отправляет (API умеет только текст и
+            # картинку), поэтому лишь ставим флаг оператора и логируем: менеджер
+            # взял диалог, но конкретный файл клиенту не долетит.
             logger.info("📩 amoJo→Авито: менеджер %s прислал «%s» в чат %s:%s — флаг "
-                        "оператора поставлен, вложения пока не пересылаем",
+                        "оператора поставлен, такой тип вложения Авито не отправляет",
                         imya, tip, kod, chat_id)
             return
         try:
@@ -98,3 +123,30 @@ class PriyomAmo:
             await zh.ishodyashchee(chat_id, tekst)
         logger.info("📩 amoJo→Авито: менеджер %s → клиенту в чат %s:%s (перехват): %s",
                     imya, kod, chat_id, tekst[:80])
+
+    async def _pereslat_kartinku(self, api, kod: str, chat_id: str, imya: str,
+                                 inner: dict) -> None:
+        """Картинка менеджера из amoCRM → клиенту в Авито (14.9, исходящие вложения).
+
+        Двухшагово: качаем media по публичному URL амоджо → грузим в Авито
+        (`zagruzit_kartinku`) → отправляем в чат (`otpravit_kartinku`). id ушедшей
+        реплики пишем в журнал оператора, иначе следующее сообщение клиента детектор
+        примет за ответ живого менеджера. Любой сбой (скачка/загрузка/отправка) не
+        роняет вебхук: логируем и выходим, флаг оператора уже стоит."""
+        media = inner.get("media")
+        try:
+            dannye, ctype = await self._skachat(media)
+            image_id = await api.zagruzit_kartinku(
+                dannye, imya=inner.get("file_name") or "image.jpg",
+                tip=ctype or "image/jpeg")
+            rezultat = await api.otpravit_kartinku(chat_id, image_id)
+        except Exception as e:  # noqa: BLE001 — сбой пересылки не срывает вебхук
+            log_oshibka(f"amoJo→Авито: не переслал фото менеджера в {kod}:{chat_id}: {e}")
+            return
+        await self._operatory.zapomnit_otpravlennoe(
+            kod, chat_id, (rezultat or {}).get("id"))
+        zh = self._zhurnaly.get(kod)
+        if zh is not None:
+            await zh.ishodyashchee(chat_id, "📷 фото")
+        logger.info("📩 amoJo→Авито: менеджер %s → клиенту ФОТО в чат %s:%s (перехват)",
+                    imya, kod, chat_id)
