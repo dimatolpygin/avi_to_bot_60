@@ -150,6 +150,25 @@ async def test_kartinka_menedzhera_peresylaetsya_klientu():
     assert api.otpravleno == []                                 # текст не слали
 
 
+async def test_kartinka_s_podpisyu_doshlet_tekst_otdelno():
+    """Подпись к фото амоджо кладёт в text picture-события → шлём её отдельным
+    сообщением (картинка в Авито подпись не несёт)."""
+    zh = _FakeZhurnal()
+
+    async def fake_skachat(url):
+        return b"jpeg", "image/jpeg"
+
+    priyom, api, op = _priyom(zhurnal=zh, skachat=fake_skachat)
+    await priyom(_sobytie(tip="picture", tekst="тест",
+                          media="https://files.amojo/ph.jpg"))
+
+    assert api.kartinki == [("u2i-abc", "img-999")]             # фото ушло
+    assert api.otpravleno == [("u2i-abc", "тест")]              # и подпись — текстом
+    assert op.zapomneno == [("sbsauna", "u2i-abc", "avito-img-1"),
+                            ("sbsauna", "u2i-abc", "avito-out-1")]  # оба id в журнал
+    assert zh.ishod == [("u2i-abc", "📷 фото"), ("u2i-abc", "тест")]
+
+
 async def test_kartinka_sboy_skachivaniya_ne_ronyaet_no_flag_stoit():
     async def fake_skachat(url):
         raise RuntimeError("404 от файлового хостинга amoJo")

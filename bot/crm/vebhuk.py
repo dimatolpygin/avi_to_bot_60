@@ -150,3 +150,19 @@ class PriyomAmo:
             await zh.ishodyashchee(chat_id, "📷 фото")
         logger.info("📩 amoJo→Авито: менеджер %s → клиенту ФОТО в чат %s:%s (перехват)",
                     imya, kod, chat_id)
+        # Подпись к фото амоджо кладёт в text ТОГО ЖЕ picture-события (у группы фото
+        # — в одном из событий). Картинка в Авито подписи не несёт (messages/image
+        # берёт только image_id), поэтому непустой text дошлём отдельным сообщением.
+        podpis = (inner.get("text") or "").strip()
+        if not podpis:
+            return
+        try:
+            r2 = await api.otpravit(chat_id, podpis)
+        except Exception as e:  # noqa: BLE001 — фото уже ушло, подпись не критична
+            log_oshibka(f"amoJo→Авито: не отправил подпись к фото в {kod}:{chat_id}: {e}")
+            return
+        await self._operatory.zapomnit_otpravlennoe(kod, chat_id, (r2 or {}).get("id"))
+        if zh is not None:
+            await zh.ishodyashchee(chat_id, podpis)
+        logger.info("📩 amoJo→Авито: подпись к фото → клиенту в чат %s:%s: %s",
+                    kod, chat_id, podpis[:80])
