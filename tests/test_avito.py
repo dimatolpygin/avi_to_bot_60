@@ -12,8 +12,8 @@ import httpx
 import pytest
 
 from bot.channels.avito import (AvitoAPI, OshibkaAvito, Vidennye, Vhodyashchee,
-                                 cikl_pollinga, izvlech_vhodyashchee,
-                                 sdelat_obrabotchik)
+                                 _sobrat_vhodyashchie, cikl_pollinga,
+                                 izvlech_vhodyashchee, sdelat_obrabotchik)
 from bot.config import AvitoConfig
 
 CFG = AvitoConfig(client_id="cid", client_secret="sec", user_id=23598618)
@@ -105,6 +105,123 @@ def test_vidennye_novyy_msg_v_tom_zhe_chate():
     v2 = izvlech_vhodyashchee(_chat_vhod(msg_id="m2"))
     vid.otmetit(v1)
     assert vid.novoe(v2)                                        # клиент дописал — новое
+
+
+def test_vidennye_zalp_dva_id_oba_novye_potom_povtor():
+    """Набор id на чат: два разных сообщения одного чата — оба новые (раньше один
+    «последний id» второе бы затёр); повтор любого — не новое."""
+    vid = Vidennye()
+    v1 = izvlech_vhodyashchee(_chat_vhod(msg_id="m1"))
+    v2 = izvlech_vhodyashchee(_chat_vhod(msg_id="m2"))
+    assert vid.novoe(v1) and vid.novoe(v2)
+    vid.otmetit(v1)
+    vid.otmetit(v2)
+    assert not vid.novoe(v1) and not vid.novoe(v2)              # оба запомнены
+
+
+def test_vidennye_potolok_vytesnyaet_staroe():
+    vid = Vidennye(potolok=2)
+    for i in range(3):
+        vid.otmetit(izvlech_vhodyashchee(_chat_vhod(msg_id=f"m{i}")))
+    assert vid.novoe(izvlech_vhodyashchee(_chat_vhod(msg_id="m0")))  # m0 вытеснен
+    assert not vid.novoe(izvlech_vhodyashchee(_chat_vhod(msg_id="m2")))
+
+
+# ── Залп входящих: все сообщения за тик, не только last_message (14.10) ───────
+
+def _msg(msg_id, *, text=None, direction="in", created=0, author_id=42, tip=None,
+         content=None):
+    m = {"id": msg_id, "author_id": author_id, "direction": direction,
+         "created": created, "content": content if content is not None
+         else ({"text": text} if text is not None else {})}
+    if tip is not None:
+        m["type"] = tip
+    return m
+
+
+class _FakeMsgApi:
+    """Отдаёт заранее заданный список сообщений (или падает) на `soobshcheniya`."""
+
+    def __init__(self, msgs, *, oshibka=False):
+        self._msgs = msgs
+        self._oshibka = oshibka
+        self.sprosheno = []
+
+    async def soobshcheniya(self, chat_id, *, limit=20):
+        self.sprosheno.append(chat_id)
+        if self._oshibka:
+            raise OshibkaAvito("нет списка", status=500)
+        return self._msgs
+
+
+async def test_sobrat_beret_vse_vhodyashchie_v_hronologii():
+    # выдача Авито «свежие первыми» — helper обязан вернуть старые первыми
+    api = _FakeMsgApi([_msg("m3", text="три", created=102),
+                       _msg("m2", text="два", created=101),
+                       _msg("m1", text="раз", created=100)])
+    vhod = await _sobrat_vhodyashchie(api, _chat_vhod(chat_id="c1"))
+    assert [v.tekst for v in vhod] == ["раз", "два", "три"]      # все три, по порядку
+    assert [v.msg_id for v in vhod] == ["m1", "m2", "m3"]
+
+
+async def test_sobrat_otbrasyvaet_ishodyashchie():
+    api = _FakeMsgApi([_msg("m1", text="вопрос", created=100),
+                       _msg("o1", text="наш ответ", direction="out", created=101)])
+    vhod = await _sobrat_vhodyashchie(api, _chat_vhod(chat_id="c1"))
+    assert [v.msg_id for v in vhod] == ["m1"]                    # исходящее — мимо
+
+
+async def test_sobrat_zalp_foto_odnoy_sekundy_vse_prihodyat():
+    """3 фото группой с одинаковым `created` — не теряем ни одного."""
+    api = _FakeMsgApi([_msg(f"p{i}", tip="image", created=200,
+                            content={"image": {"sizes": {"1x1": f"https://cdn/{i}.jpg"}}})
+                       for i in range(3)])
+    vhod = await _sobrat_vhodyashchie(api, _chat_vhod(chat_id="c1"))
+    assert sorted(v.msg_id for v in vhod) == ["p0", "p1", "p2"]
+    assert all(v.vlozhenie and v.vlozhenie["tip"] == "picture" for v in vhod)
+
+
+async def test_sobrat_folbek_na_last_message_pri_sboe():
+    api = _FakeMsgApi([], oshibka=True)
+    vhod = await _sobrat_vhodyashchie(api, _chat_vhod(chat_id="c1", msg_id="lm", text="хай"))
+    assert [(v.msg_id, v.tekst) for v in vhod] == [("lm", "хай")]  # хотя бы последнее
+
+
+async def test_sobrat_prokidyvaet_obyavlenie_v_kazhdoe():
+    api = _FakeMsgApi([_msg("m1", text="а", created=1), _msg("m2", text="б", created=2)])
+    chat = _chat_vhod(chat_id="c1", item={"id": 7, "title": "Отделка бани"})
+    vhod = await _sobrat_vhodyashchie(api, chat)
+    assert all(v.obyavlenie and v.obyavlenie["title"] == "Отделка бани" for v in vhod)
+
+
+async def test_cikl_obrabatyvaet_ves_zalp():
+    """Поллер зовёт обработчик на КАЖДОЕ входящее залпа, не только на последнее."""
+    stop = asyncio.Event()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/token":
+            return httpx.Response(200, json={"access_token": "T1", "expires_in": 86400})
+        if request.url.path.endswith("/chats"):
+            stop_now = _chat_vhod(chat_id="c1")
+            return httpx.Response(200, json={"chats": [stop_now]})
+        if request.url.path.endswith("/messages/"):
+            stop.set()                                          # один тик достаточно
+            return httpx.Response(200, json={"messages": [
+                _msg("m1", text="раз", created=1),
+                _msg("m2", text="два", created=2),
+                _msg("m3", text="три", created=3)]})
+        return httpx.Response(404)
+
+    poluchennye = []
+
+    async def obrabotchik(v: Vhodyashchee) -> None:
+        poluchennye.append(v.tekst)
+
+    async with _api_s_transportom(handler) as api:
+        await asyncio.wait_for(
+            cikl_pollinga(api, obrabotchik, stop, interval_s=0.01), timeout=2.0)
+
+    assert poluchennye == ["раз", "два", "три"]                 # весь залп обработан
 
 
 # ── Токен ────────────────────────────────────────────────────────────────────
@@ -246,6 +363,10 @@ async def test_cikl_zovet_obrabotchik_odin_raz_na_soobshchenie():
             # Один и тот же непрочитанный чат на каждом тике — дедуп обязан не
             # дать обработать его дважды.
             return httpx.Response(200, json={"chats": [_chat_vhod()]})
+        if request.url.path.endswith("/messages/"):
+            return httpx.Response(200, json={"messages": [
+                {"id": "m1", "author_id": 42, "direction": "in",
+                 "content": {"text": "привет"}}]})
         return httpx.Response(404)
 
     poluchennye = []

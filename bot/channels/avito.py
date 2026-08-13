@@ -245,30 +245,74 @@ def _izvlech_vlozhenie(lm: dict) -> dict | None:
     return {"tip": tip, "url": None, "imya": None, "razmer": None}
 
 
-def izvlech_vhodyashchee(chat: dict) -> Vhodyashchee | None:
-    """Достать последнее входящее из объекта чата.
+def _obyavlenie_chata(chat: dict) -> dict | None:
+    """Объявление, под которым идёт чат: `context.value` при `type=="item"`.
 
-    В `chats` уже едет `last_message` с направлением — отдельный запрос за
-    сообщениями не нужен (это главная экономия: не дёргаем API на каждый чат).
-    Исходящие (`direction != "in"`) и служебные игнорируем.
-    """
-    lm = chat.get("last_message") or {}
-    if lm.get("direction") != "in":
+    Живёт в объекте ЧАТА, а не в сообщении — поэтому при разборе из списка
+    сообщений его берём один раз из чата и прокидываем в каждое входящее."""
+    kontekst = chat.get("context") or {}
+    return kontekst.get("value") if kontekst.get("type") == "item" else None
+
+
+def _vhodyashchee_iz_soobshcheniya(chat_id: str, msg: dict,
+                                   obyavlenie: dict | None) -> Vhodyashchee | None:
+    """Разобрать ОДНО сообщение (из `last_message` или списка сообщений) во
+    `Vhodyashchee`. Исходящие (`direction != "in"`) и без id — отбрасываем."""
+    if msg.get("direction") != "in":
         return None
-    msg_id = lm.get("id")
+    msg_id = msg.get("id")
     if not msg_id:
         return None
-    content = lm.get("content") or {}
-    kontekst = chat.get("context") or {}
-    obyavlenie = kontekst.get("value") if kontekst.get("type") == "item" else None
+    content = msg.get("content") or {}
     return Vhodyashchee(
-        chat_id=str(chat.get("id")),
+        chat_id=chat_id,
         msg_id=str(msg_id),
-        author_id=lm.get("author_id"),
+        author_id=msg.get("author_id"),
         tekst=content.get("text"),
         obyavlenie=obyavlenie,
-        vlozhenie=_izvlech_vlozhenie(lm),
+        vlozhenie=_izvlech_vlozhenie(msg),
     )
+
+
+def izvlech_vhodyashchee(chat: dict) -> Vhodyashchee | None:
+    """Достать последнее входящее из объекта чата (`last_message`).
+
+    Фолбэк, когда список сообщений недоступен. Основной путь поллинга — через
+    `_sobrat_vhodyashchie`, который берёт ВСЕ входящие чата (иначе залп сообщений
+    между тиками схлопывался бы к одному `last_message`, узел 14.10).
+    """
+    return _vhodyashchee_iz_soobshcheniya(
+        str(chat.get("id")), chat.get("last_message") or {}, _obyavlenie_chata(chat))
+
+
+async def _sobrat_vhodyashchie(api: "AvitoAPI", chat: dict) -> list[Vhodyashchee]:
+    """Все входящие чата в хронологическом порядке (14.10).
+
+    Тянем список сообщений (`AvitoAPI.soobshcheniya`) и берём каждое входящее, а не
+    только `last_message`: клиент может прислать несколько сообщений (напр. группу
+    фото) за один интервал поллинга, и все, кроме последнего, иначе теряются.
+    Объявление берём из объекта чата (в самих сообщениях его нет). Сбой запроса за
+    списком → фолбэк на `last_message`, чтобы не потерять хотя бы последнее."""
+    obyavlenie = _obyavlenie_chata(chat)
+    chat_id = str(chat.get("id"))
+    try:
+        msgs = await api.soobshcheniya(chat_id)
+    except Exception as e:  # noqa: BLE001 — не смогли список → хотя бы last_message
+        log_oshibka(f"Поллинг Авито: список сообщений чата {chat_id}: {e}")
+        v = izvlech_vhodyashchee(chat)
+        return [v] if v is not None else []
+    # Порядок выдачи Авито не гарантирован; сортируем по времени, старые первыми.
+    # `created` — секунды, у залпа фото совпадает: reverse перед устойчивой
+    # сортировкой даёт для равных времён порядок, обратный выдаче (обычно
+    # свежие-первыми → станет старые-первыми).
+    poryadok = sorted((m for m in reversed(msgs) if isinstance(m, dict)),
+                      key=lambda m: m.get("created") or 0)
+    vhod = [v for m in poryadok
+            if (v := _vhodyashchee_iz_soobshcheniya(chat_id, m, obyavlenie)) is not None]
+    if vhod:
+        return vhod
+    v = izvlech_vhodyashchee(chat)          # список без входящих — пробуем last_message
+    return [v] if v is not None else []
 
 
 def posledny_ishodyashchiy(soobshcheniya: list[dict]) -> dict | None:
@@ -284,22 +328,36 @@ def posledny_ishodyashchiy(soobshcheniya: list[dict]) -> dict | None:
     return ishod[-1]
 
 
-class Vidennye:
-    """Дедуп: какой msg_id был последним обработанным в каждом чате.
+_VIDENNYH_NA_CHAT = 200      # сколько последних id держим на чат (защита от роста)
 
-    Держится в памяти процесса — этого хватает, чтобы повторный поллинг не
-    отвечал дважды на то же сообщение. Переживание рестарта (Redis) — забота
-    подэтапа 14.5, где поллинг сменится вебхуком.
+
+class Vidennye:
+    """Дедуп: НАБОР обработанных msg_id в каждом чате.
+
+    Раньше хранили один «последний id», но при залпе сообщений (клиент шлёт группу
+    фото) за тик приходит несколько входящих, и один id их не различал бы — второе
+    сообщение с тем же чатом ложно считалось бы «уже виденным» или, наоборот,
+    затирало бы первое. Теперь помним набор id на чат (с потолком). Держится в
+    памяти процесса — этого хватает, чтобы повторный поллинг не отвечал дважды.
     """
 
-    def __init__(self) -> None:
-        self._poslednie: dict[str, str] = {}
+    def __init__(self, potolok: int = _VIDENNYH_NA_CHAT) -> None:
+        self._potolok = potolok
+        self._nabory: dict[str, set[str]] = {}
+        self._poryadok: dict[str, list[str]] = {}
 
     def novoe(self, v: Vhodyashchee) -> bool:
-        return self._poslednie.get(v.chat_id) != v.msg_id
+        return v.msg_id not in self._nabory.get(v.chat_id, ())
 
     def otmetit(self, v: Vhodyashchee) -> None:
-        self._poslednie[v.chat_id] = v.msg_id
+        nabor = self._nabory.setdefault(v.chat_id, set())
+        if v.msg_id in nabor:
+            return
+        nabor.add(v.msg_id)
+        poryadok = self._poryadok.setdefault(v.chat_id, [])
+        poryadok.append(v.msg_id)
+        if len(poryadok) > self._potolok:
+            nabor.discard(poryadok.pop(0))
 
 
 # ── Цикл поллинга ────────────────────────────────────────────────────────────
@@ -316,11 +374,11 @@ async def cikl_pollinga(api: AvitoAPI, obrabotchik, stop: asyncio.Event, *,
     while not stop.is_set():
         try:
             for chat in await api.chaty(tolko_neprochitannye=True):
-                v = izvlech_vhodyashchee(chat)
-                if v is None or not vid.novoe(v):
-                    continue
-                vid.otmetit(v)
-                await obrabotchik(v)
+                for v in await _sobrat_vhodyashchie(api, chat):
+                    if not vid.novoe(v):
+                        continue
+                    vid.otmetit(v)
+                    await obrabotchik(v)
         except asyncio.CancelledError:
             raise
         except Exception as e:  # noqa: BLE001 — цикл живёт дальше
