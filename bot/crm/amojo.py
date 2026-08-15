@@ -28,11 +28,18 @@ from email.utils import formatdate
 
 import httpx
 
+from ..cache import PREFIKS
 from ..config import AmojoConfig
 from ..logger import log_oshibka, logger
 
 TAYMAUT_S = 30.0
 CONTENT_TYPE = "application/json"
+
+# TTL маппинга «чат Авито → amojo-UUID сделки» в Redis (14.11). Держим долго:
+# сделка в «Неразобранном» живёт до тех пор, пока менеджер её не разберёт, а
+# горячий момент может случиться и через неделю переписки. Истёк — передача
+# просто создаст новую сделку (мягкий фолбэк), не потеряет клиента.
+_TTL_CONV_S = 60 * 60 * 24 * 30            # 30 суток
 
 
 class OshibkaAmojo(Exception):
@@ -203,7 +210,7 @@ class Zerkalo:
     """
 
     def __init__(self, api: AmojoAPI, kod: str, imya_bota: str, *,
-                 bot_ref_id: str | None = None):
+                 bot_ref_id: str | None = None, redis=None):
         self.api = api
         self.kod = kod
         self.imya_bota = imya_bota
@@ -211,10 +218,36 @@ class Zerkalo:
         # исходящие. Пусто → исходящие НЕ зеркалим (см. ishodyashchee): amojo без
         # ref_id их отклоняет. Появится в 14.4 вместе с OAuth-токеном amoCRM.
         self.bot_ref_id = bot_ref_id or None
+        # Redis для маппинга «чат → amojo-UUID сделки» (14.11). None → не пишем
+        # (тесты/без кеша); тогда передача менеджеру пойдёт по фолбэку.
+        self._redis = redis
 
     def _dialog(self, chat_id: str) -> str:
         # Стабильный id чата в amoCRM: один чат Авито = один чат в карточке.
         return f"{self.kod}:{chat_id}"
+
+    @staticmethod
+    def klyuch_conv(kod: str, chat_id: str) -> str:
+        """Redis-ключ маппинга чата Авито на amojo-UUID сделки (14.11)."""
+        return f"{PREFIKS}:amo:conv:{kod}:{chat_id}"
+
+    async def _zapomnit_conv(self, chat_id: str, otvet: dict) -> None:
+        """Достать `conversation_id` (внутренний amojo-UUID чата amoCRM) из ответа
+        `new_message` и положить в Redis (14.11).
+
+        Этот UUID — единственный ключ, по которому потом находится сделка чата
+        (`AmoAPI.nayti_sdelku_po_chatu`), чтобы двинуть её из «Неразобранного» без
+        телефона. Пишем на каждом входящем: значение стабильно, лишний SET дёшев, а
+        сбой Redis глушим — зеркало важнее маппинга и диалог из-за него не рвём."""
+        if self._redis is None:
+            return
+        conv = ((otvet or {}).get("new_message") or {}).get("conversation_id")
+        if not conv:
+            return
+        try:
+            await self._redis.set(self.klyuch_conv(self.kod, chat_id), conv, ex=_TTL_CONV_S)
+        except Exception as e:  # noqa: BLE001 — маппинг не критичен для диалога
+            log_oshibka(f"amoCRM: не запомнил conv-UUID чата {self.kod}:{chat_id}: {e}")
 
     def _klient(self, chat_id: str, avtor_id, imya: str | None,
                 telefon: str | None = None) -> dict:
@@ -228,11 +261,12 @@ class Zerkalo:
                            *, imya: str | None = None) -> None:
         """Сообщение клиента → входящее в amoCRM (только sender)."""
         try:
-            await self.api.new_message(payload_soobshcheniya(
+            otvet = await self.api.new_message(payload_soobshcheniya(
                 conversation_id=self._dialog(chat_id),
                 msgid=f"avito:{msg_id}",
                 sender=self._klient(chat_id, avtor_id, imya),
                 tekst=tekst))
+            await self._zapomnit_conv(chat_id, otvet)
             logger.info("📤 amoCRM ← клиент (чат %s): зеркалировано входящее", chat_id)
         except Exception as e:  # noqa: BLE001 — зеркало не роняет диалог
             log_oshibka(f"amoCRM зеркало (входящее, чат {chat_id}): {e}")
@@ -249,13 +283,14 @@ class Zerkalo:
         if not url:
             return
         try:
-            await self.api.new_message(payload_soobshcheniya(
+            otvet = await self.api.new_message(payload_soobshcheniya(
                 conversation_id=self._dialog(chat_id),
                 msgid=f"avito:{msg_id}",
                 sender=self._klient(chat_id, avtor_id, imya),
                 soobshchenie=soobshchenie_media(
                     vlozhenie.get("tip") or "picture", url,
                     imya=vlozhenie.get("imya"), razmer=vlozhenie.get("razmer"))))
+            await self._zapomnit_conv(chat_id, otvet)
             logger.info("📤 amoCRM ← клиент (чат %s): зеркалировано вложение (%s)",
                         chat_id, vlozhenie.get("tip"))
         except Exception as e:  # noqa: BLE001 — зеркало не роняет диалог

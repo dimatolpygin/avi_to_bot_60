@@ -227,6 +227,44 @@ async def test_zerkalo_glushit_oshibku_ne_ronyaet():
     await z.ishodyashchee("c1", "т")              # не должно бросить
 
 
+# ── Маппинг чата на amojo-UUID сделки (14.11) ────────────────────────────────
+
+class _FakeRedisKV:
+    def __init__(self):
+        self.kv = {}
+
+    async def set(self, key, value, ex=None):
+        self.kv[key] = value
+
+
+class _APIsConv:
+    """new_message возвращает conversation_id — внутренний amojo-UUID чата amoCRM."""
+    async def new_message(self, payload):
+        return {"new_message": {"conversation_id": "UUID-777", "msgid": "m"}}
+
+
+async def test_zerkalo_zapominaet_conv_uuid_na_vhodyashchem():
+    redis = _FakeRedisKV()
+    z = Zerkalo(_APIsConv(), "sbsauna", "Роман", redis=redis)
+    await z.vhodyashchee("c1", "m1", 42, "здравствуйте")
+    assert redis.kv == {Zerkalo.klyuch_conv("sbsauna", "c1"): "UUID-777"}
+
+
+async def test_zerkalo_bez_redis_ne_padaet():
+    z = Zerkalo(_APIsConv(), "sbsauna", "Роман")     # redis=None
+    await z.vhodyashchee("c1", "m1", 42, "здравствуйте")   # не должно бросить
+
+
+async def test_zerkalo_conv_bez_uuid_ne_pishet():
+    class _APIsPusto:
+        async def new_message(self, payload):
+            return {"new_message": {"msgid": "m"}}     # без conversation_id
+    redis = _FakeRedisKV()
+    z = Zerkalo(_APIsPusto(), "sbsauna", "Роман", redis=redis)
+    await z.vhodyashchee("c1", "m1", 42, "т")
+    assert redis.kv == {}
+
+
 # ── Проводка зеркала в адаптер Авито ─────────────────────────────────────────
 
 class _FakeYadro:
@@ -291,8 +329,8 @@ async def test_obrabotchik_zerkalit_vlozhenie_klienta():
     assert z.vlozh == [("c1", {"tip": "picture", "url": "https://u/p.jpg",
                                "imya": "photo.jpg", "razmer": None})]
     assert ya.obrabotano == []                                    # картинку ядру не отдаём
-    assert api.otpravleno and "текстом" in api.otpravleno[0][1]   # просим написать
-    assert z.ishod and "текстом" in z.ishod[0][1]                 # и просьба зеркалится в amoCRM
+    assert api.otpravleno and "словами" in api.otpravleno[0][1]   # просим описать словами
+    assert z.ishod and "словами" in z.ishod[0][1]                 # и просьба зеркалится в amoCRM
 
 
 async def test_kanal_zerkalit_ishodyashchee_posle_otpravki():

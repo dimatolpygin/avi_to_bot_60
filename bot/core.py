@@ -190,6 +190,7 @@ class Yadro:
                 data_praysa=self._data_praysa.get(prof.kod, ""),
                 sistemny=self._sistemny(prof.kod, klyuch),
                 peredat_lead=self._peredat_lead(prof.kod, klyuch),
+                peredat_dialog=self._peredat_dialog(prof.kod, klyuch),
             )
             return rezultat.otvet
         return otvechat
@@ -238,6 +239,38 @@ class Yadro:
                 from .crm.amo import otpravit_lead_po_id
                 self._v_fone(otpravit_lead_po_id(
                     self.cfg.amo_rest, self._redis, self._fabrika_sessiy, lead_id))
+        return peredat
+
+    def _peredat_dialog(self, kod: str, klyuch: str):
+        """Куда уходит ГОРЯЧИЙ диалог, когда клиент созрел, но телефона не оставил (14.11).
+
+        В отличие от лида, тут нет контакта для записи в `leads` — передаём в amoCRM
+        напрямую: двигаем сделку чата из «Неразобранного» на «Первичный контакт»,
+        назначаем менеджера 50/50 и ставим задачу. Сделку находим по amojo-UUID чата,
+        который зеркало (`Zerkalo`) положило в Redis при первом входящем. В ФОНЕ —
+        ответ клиенту не должен ждать похода в CRM.
+
+        Нет amoCRM или Redis (Telegram-обкатка, тесты) → тихо выходим: механики
+        передачи там нет, а ронять ответ клиенту нельзя.
+        """
+        _, _, chat = klyuch.partition(":")
+
+        async def peredat(prichina: str, vyzhimka: str) -> None:
+            if self.cfg.amo_rest is None:
+                logger.info("🤝 Передача менеджеру пропущена: amoCRM не подключён (%s)", prichina)
+                return
+            conv_uuid = None
+            if self._redis is not None:
+                from .crm.amojo import Zerkalo
+                try:
+                    conv_uuid = await self._redis.get(Zerkalo.klyuch_conv(kod, chat))
+                except Exception as e:  # noqa: BLE001 — кеш не роняет передачу
+                    logger.warning("🤝 Не прочитал conv-UUID чата %s:%s (%s) — "
+                                   "передача создаст новую сделку", kod, chat, e)
+            from .crm.amo import peredat_dialog_menedzheru
+            self._v_fone(peredat_dialog_menedzheru(
+                self.cfg.amo_rest, self._redis, kod=kod,
+                conv_uuid=conv_uuid, vyzhimka=vyzhimka))
         return peredat
 
     def _v_fone(self, coro) -> None:

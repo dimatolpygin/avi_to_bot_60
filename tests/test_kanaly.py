@@ -132,7 +132,7 @@ async def test_agent_bez_poiska_ne_daet_instrument(monkeypatch):
     # Поиска нет, а передача лида есть: прайса у аккаунта не существует,
     # контакт клиента — существует, и для отделки он даже важнее.
     imena = [i["function"]["name"] for i in fake.vyzovy[0]["tools"]]
-    assert imena == ["save_lead"]
+    assert imena == ["save_lead", "peredat_menedzheru"]
     assert r.zaprosy_poiska == []
 
 
@@ -352,8 +352,8 @@ async def test_raznye_akkaunty_otvechayut_svoim_promptom(monkeypatch):
     assert "Александра" in promt_tovarnyy and "Роман" not in promt_tovarnyy
     assert "Роман" in promt_uslugi and "500 тысяч" in promt_uslugi
     imena = lambda i: [t["function"]["name"] for t in fake.vyzovy[i]["tools"]]
-    assert imena(0) == ["search_products", "save_lead"]   # у товарного оба
-    assert imena(1) == ["save_lead"]                      # у услуг только лид
+    assert imena(0) == ["search_products", "save_lead", "peredat_menedzheru"]  # у товарного все
+    assert imena(1) == ["save_lead", "peredat_menedzheru"]  # у услуг лид + передача
 
 
 async def test_odin_chat_v_raznyh_botah_ne_smeshivaet_istorii(monkeypatch):

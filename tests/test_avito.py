@@ -423,7 +423,7 @@ async def test_vlozhenie_bez_teksta_prosit_tekstom_ne_zovet_yadro():
     await obr(izvlech_vhodyashchee(chat))
 
     assert ya.obrabotano == []                           # ядру вложение не отдаём
-    assert api.otpravleno and "текстом" in api.otpravleno[0][1]
+    assert api.otpravleno and "словами" in api.otpravleno[0][1]
 
 
 class _FakeOperatory:
@@ -466,7 +466,7 @@ async def test_vlozhenie_prompt_pishetsya_v_zhurnal_operatora():
     await obr(izvlech_vhodyashchee(_chat_foto()))
 
     assert op.zapomneno == [("c1", "p1")]                # id промпта записан
-    assert api.otpravleno and "текстом" in api.otpravleno[0][1]
+    assert api.otpravleno and "словами" in api.otpravleno[0][1]
 
 
 async def test_vlozhenie_pod_operatorom_molchit():

@@ -13,8 +13,10 @@ import httpx
 import pytest
 
 from bot.config import AmoRestConfig
+from bot.crm import amo as amo_mod
 from bot.crm.amo import (STATUS_NERAZOBRANNOE, STATUS_PERVICHNY, VORONKA_SAUNA,
-                         AmoAPI, OshibkaAmo, otpravit_lead, vybrat_menedzhera)
+                         AmoAPI, OshibkaAmo, otpravit_lead,
+                         peredat_dialog_menedzheru, vybrat_menedzhera)
 
 CFG = AmoRestConfig(base_url="https://sbcompany.amocrm.ru", access_token="T0KEN")
 
@@ -190,3 +192,129 @@ async def test_otpravit_lead_sboy_stavit_failed():
     assert ok is False
     assert lead.status == "failed"
     assert lead.error and lead.amo_lead_id is None
+
+
+# ── Поиск сделки чата и движение по этапу (14.11) ─────────────────────────────
+
+def _router(*, chats, leads, patch_zahvat=None):
+    """MockTransport-роутер по цепочке чат→контакт→сделки. `chats` — ответ на
+    contacts/chats; `leads` — {id: {pipeline, status, responsible}}."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        p = request.url.path
+        if request.method == "PATCH" and p.startswith("/api/v4/leads/"):
+            if patch_zahvat is not None:
+                patch_zahvat["path"] = p
+                patch_zahvat["telo"] = json.loads(request.content)
+            return httpx.Response(200, json={"id": int(p.rsplit("/", 1)[1])})
+        if p == "/api/v4/contacts/chats":
+            return httpx.Response(200, json={"_embedded": {"chats": chats}})
+        if p.startswith("/api/v4/contacts/"):
+            ids = [{"id": lid} for lid in leads]
+            return httpx.Response(200, json={"_embedded": {"leads": ids}})
+        tail = p.rsplit("/", 1)[1]
+        if request.method == "GET" and p.startswith("/api/v4/leads/") and tail.isdigit():
+            d = leads[int(tail)]
+            return httpx.Response(200, json={
+                "id": int(tail), "pipeline_id": d["pipeline"],
+                "status_id": d["status"], "responsible_user_id": d.get("responsible", 0)})
+        if p == "/api/v4/leads/complex":
+            return httpx.Response(200, json=[{"id": 999, "contact_id": 888}])
+        return httpx.Response(200, json=[{"id": 1}])       # notes / tasks
+    return handler
+
+
+async def test_nayti_sdelku_beret_nerazobrannoe():
+    """Из сделок чата двигаем ту, что в «Неразобранном»."""
+    handler = _router(
+        chats=[{"chat_id": "u", "contact_id": 55}],
+        leads={10: {"pipeline": VORONKA_SAUNA, "status": 22133325},       # уже в работе
+               20: {"pipeline": VORONKA_SAUNA, "status": STATUS_NERAZOBRANNOE}})
+    async with _api(handler) as api:
+        r = await api.nayti_sdelku_po_chatu("u")
+    assert r["lead_id"] == 20 and r["status_id"] == STATUS_NERAZOBRANNOE
+
+
+async def test_nayti_sdelku_net_chata_none():
+    handler = _router(chats=[], leads={})
+    async with _api(handler) as api:
+        assert await api.nayti_sdelku_po_chatu("u") is None
+
+
+async def test_nayti_sdelku_bez_neraz_beret_lyuboy_saune():
+    handler = _router(
+        chats=[{"chat_id": "u", "contact_id": 55}],
+        leads={10: {"pipeline": 3109131, "status": 1},                    # чужая воронка
+               20: {"pipeline": VORONKA_SAUNA, "status": 22133325, "responsible": 6783360}})
+    async with _api(handler) as api:
+        r = await api.nayti_sdelku_po_chatu("u")
+    assert r["lead_id"] == 20 and r["responsible_id"] == 6783360
+
+
+async def test_dvinut_sdelku_patch_telo():
+    zahvat = {}
+    handler = _router(chats=[], leads={}, patch_zahvat=zahvat)
+    async with _api(handler) as api:
+        await api.dvinut_sdelku(20, status_id=STATUS_PERVICHNY, responsible_id=6783360)
+    assert zahvat["path"] == "/api/v4/leads/20"
+    assert zahvat["telo"] == {"status_id": STATUS_PERVICHNY, "responsible_user_id": 6783360}
+
+
+async def test_dvinut_sdelku_pusto_ne_hodit():
+    def handler(request):
+        raise AssertionError("PATCH не должен уходить при пустом теле")
+    async with _api(handler) as api:
+        await api.dvinut_sdelku(20)         # без полей — no-op
+
+
+# ── Оркестрация передачи диалога менеджеру (14.11) ───────────────────────────
+
+async def test_peredat_dialog_dvigaet_neraz_i_stavit_zadachu():
+    zahvat = {}
+    handler = _router(
+        chats=[{"chat_id": "u", "contact_id": 55}],
+        leads={20: {"pipeline": VORONKA_SAUNA, "status": STATUS_NERAZOBRANNOE}},
+        patch_zahvat=zahvat)
+    async with _api(handler) as api:
+        # Оркестрация создаёт свой AmoAPI — подменяем его нашим (с MockTransport).
+        import contextlib
+
+        @contextlib.asynccontextmanager
+        async def _fake(_cfg):
+            yield api
+        with_orig = amo_mod.AmoAPI
+        try:
+            amo_mod.AmoAPI = lambda _cfg: _fake(_cfg)
+            ok = await peredat_dialog_menedzheru(
+                CFG, _FakeRedis(), kod="sbsauna", conv_uuid="u", vyzhimka="созрел")
+        finally:
+            amo_mod.AmoAPI = with_orig
+    assert ok is True
+    assert zahvat["telo"]["status_id"] == STATUS_PERVICHNY     # двинули из Неразобранного
+    assert zahvat["telo"]["responsible_user_id"] in (6783360, 1356618)
+
+
+async def test_peredat_dialog_folbek_sozdaet_sdelku():
+    """Нет conv_uuid (маппинга) → создаём новую сделку на «Первичном контакте»."""
+    zahvat = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/v4/leads/complex":
+            zahvat["telo"] = json.loads(request.content)
+            return httpx.Response(200, json=[{"id": 999, "contact_id": 888}])
+        return httpx.Response(200, json=[{"id": 1}])           # notes / tasks
+
+    async with _api(handler) as api:
+        import contextlib
+
+        @contextlib.asynccontextmanager
+        async def _fake(_cfg):
+            yield api
+        with_orig = amo_mod.AmoAPI
+        try:
+            amo_mod.AmoAPI = lambda _cfg: _fake(_cfg)
+            ok = await peredat_dialog_menedzheru(
+                CFG, _FakeRedis(), kod="sbsauna", conv_uuid=None, vyzhimka="созрел")
+        finally:
+            amo_mod.AmoAPI = with_orig
+    assert ok is True
+    assert zahvat["telo"][0]["status_id"] == STATUS_PERVICHNY

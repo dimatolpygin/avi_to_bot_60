@@ -513,6 +513,99 @@ async def test_padenie_bd_ne_royaet_dialog(poisk, cfg, monkeypatch):
     assert r.lead_peredan is False
 
 
+# ── Передача горячего диалога менеджеру без телефона (14.11) ──────────────────
+
+
+def _vyzov_peredachi(prichina: str = "согласен на звонок",
+                     vyzhimka: str = "Клиент созрел, парная 2х3, готов к замеру",
+                     *, id_="7") -> dict:
+    args = {"prichina": prichina, "vyzhimka": vyzhimka}
+    return {"content": None, "tool_calls": [{
+        "id": id_, "type": "function",
+        "function": {"name": "peredat_menedzheru",
+                     "arguments": json.dumps(args, ensure_ascii=False)}}]}
+
+
+@pytest.mark.asyncio
+async def test_peredat_menedzheru_zovyot_kolbek_bez_telefona(cfg, monkeypatch):
+    """Клиент созрел без номера → инструмент отдаёт причину и выжимку колбэку.
+    Аккаунт услуг (poisk=None) — телефон вообще не участвует."""
+    fake = FakeChat([
+        _vyzov_peredachi(),
+        {"content": "Передаю коллеге, он свяжется с вами прямо здесь.", "tool_calls": None},
+    ])
+    monkeypatch.setattr(agent, "chat", fake)
+    peredannye = []
+
+    async def peredat(prichina, vyzhimka):
+        peredannye.append((prichina, vyzhimka))
+
+    r = await agent.otvetit(cfg, None, [], "давайте созвонимся", sistemny="тест",
+                            peredat_dialog=peredat)
+    assert peredannye == [("согласен на звонок",
+                           "Клиент созрел, парная 2х3, готов к замеру")]
+    assert "колле" in r.otvet.lower()
+
+
+@pytest.mark.asyncio
+async def test_peredat_menedzheru_povtor_za_hod_ne_dublruet(cfg, monkeypatch):
+    """Две передачи в одной реплике модели → колбэк вызывается ровно раз."""
+    dva = {"content": None, "tool_calls": [
+        _vyzov_peredachi(id_="a")["tool_calls"][0],
+        _vyzov_peredachi(id_="b")["tool_calls"][0],
+    ]}
+    fake = FakeChat([dva, {"content": "Подключаю коллегу.", "tool_calls": None}])
+    monkeypatch.setattr(agent, "chat", fake)
+    razy = []
+
+    async def peredat(prichina, vyzhimka):
+        razy.append(1)
+
+    await agent.otvetit(cfg, None, [], "готов брать", sistemny="тест",
+                        peredat_dialog=peredat)
+    assert razy == [1]
+
+
+@pytest.mark.asyncio
+async def test_peredat_menedzheru_sboy_ne_royaet_dialog(cfg, monkeypatch):
+    """Сбой передачи в CRM не обрывает ответ клиенту — как у лида."""
+    fake = FakeChat([
+        _vyzov_peredachi(),
+        {"content": "Подключаю коллегу, он ответит здесь.", "tool_calls": None},
+    ])
+    monkeypatch.setattr(agent, "chat", fake)
+
+    async def padaet(prichina, vyzhimka):
+        raise RuntimeError("amoCRM лёг")
+
+    r = await agent.otvetit(cfg, None, [], "готов к замеру", sistemny="тест",
+                            peredat_dialog=padaet)
+    assert "колле" in r.otvet.lower()
+
+
+@pytest.mark.asyncio
+async def test_peredat_menedzheru_est_u_tovarnogo_akkaunta(poisk, cfg, monkeypatch):
+    """Инструмент даётся и товарному аккаунту (у него есть и поиск, и передача)."""
+    zahvat = {}
+
+    class _Fake(FakeChat):
+        async def __call__(self, cfg_, messages, tools=None, tool_choice="auto"):
+            zahvat["imena"] = [t["function"]["name"] for t in (tools or [])]
+            return await super().__call__(cfg_, messages, tools, tool_choice)
+
+    fake = _Fake([_vyzov_peredachi(), {"content": "Передаю коллеге.", "tool_calls": None}])
+    monkeypatch.setattr(agent, "chat", fake)
+    razy = []
+
+    async def peredat(prichina, vyzhimka):
+        razy.append(1)
+
+    await agent.otvetit(cfg, poisk, [], "беру", peredat_dialog=peredat)
+    assert "peredat_menedzheru" in zahvat["imena"]
+    assert "search_products" in zahvat["imena"]
+    assert razy == [1]
+
+
 def test_telefon_normalizuetsya():
     """Один человек с двумя записями номера — это два лида в amo, а не один."""
     from bot.lead import normalizovat_telefon

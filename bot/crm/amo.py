@@ -87,6 +87,30 @@ class AmoAPI:
         except ValueError:
             return {}
 
+    async def _get(self, put: str, params=None):
+        assert self._client is not None
+        otvet = await self._client.get(put, params=params)
+        if otvet.status_code == 204:      # amoCRM отдаёт 204 на «ничего не найдено»
+            return {}
+        if otvet.status_code >= 400:
+            raise OshibkaAmo(f"amoCRM {otvet.status_code} на {put}: {otvet.text[:300]}",
+                             status=otvet.status_code)
+        try:
+            return otvet.json()
+        except ValueError:
+            return {}
+
+    async def _patch(self, put: str, telo) -> dict:
+        assert self._client is not None
+        otvet = await self._client.patch(put, json=telo)
+        if otvet.status_code >= 400:
+            raise OshibkaAmo(f"amoCRM {otvet.status_code} на {put}: {otvet.text[:300]}",
+                             status=otvet.status_code)
+        try:
+            return otvet.json()
+        except ValueError:
+            return {}
+
     async def sozdat_sdelku(self, *, imya_sdelki: str, imya_kontakta: str | None,
                             telefon: str | None, status_id: int,
                             responsible_id: int) -> dict:
@@ -122,6 +146,56 @@ class AmoAPI:
             "entity_type": "leads",
             "responsible_user_id": responsible_id,
         }])
+
+    async def nayti_sdelku_po_chatu(self, conv_uuid: str) -> dict | None:
+        """По amojo-UUID чата → сделка воронки «Сауна» этого чата или None.
+
+        Нужна для передачи диалога менеджеру БЕЗ телефона (14.11): amoCRM сам
+        завёл сделку в «Неразобранном» на первое входящее, и её надо двигать, а
+        не плодить дубль. Прямого «чат → сделка» amoCRM не даёт, поэтому идём
+        цепочкой (проверено живьём 15.08):
+          chat → `contacts/chats` → contact_id → `contacts/{id}?with=leads` → сделки.
+        Возвращает `{lead_id, status_id, responsible_id}` — приоритет у сделки в
+        «Неразобранном» (её и двигаем); если такой нет, отдаём любую сделку «Сауны»
+        (уже в работе — тогда только добавим задачу). Ничего не нашли → None (звонящий
+        создаст новую сделку). `conv_uuid` = `new_message.conversation_id` из ответа
+        amojo, его кладёт в Redis зеркало.
+        """
+        chats = await self._get("/api/v4/contacts/chats", {"chat_id[]": conv_uuid})
+        spisok = (chats.get("_embedded", {}).get("chats", [])
+                  if isinstance(chats, dict) else [])
+        contact_id = spisok[0].get("contact_id") if spisok else None
+        if not contact_id:
+            return None
+        kont = await self._get(f"/api/v4/contacts/{contact_id}", {"with": "leads"})
+        lead_ids = [l.get("id") for l in
+                    (kont.get("_embedded", {}).get("leads", []) if isinstance(kont, dict) else [])
+                    if l.get("id")]
+        kandidat: dict | None = None
+        for lid in lead_ids:
+            lead = await self._get(f"/api/v4/leads/{lid}")
+            if not isinstance(lead, dict) or lead.get("pipeline_id") != VORONKA_SAUNA:
+                continue
+            info = {"lead_id": lid, "status_id": lead.get("status_id"),
+                    "responsible_id": lead.get("responsible_user_id") or 0}
+            if lead.get("status_id") == STATUS_NERAZOBRANNOE:
+                return info                    # идеальная цель — её и двигаем
+            kandidat = kandidat or info        # уже в работе — запасной вариант
+        return kandidat
+
+    async def dvinut_sdelku(self, lead_id: int, *, status_id: int | None = None,
+                            responsible_id: int | None = None) -> None:
+        """Сдвинуть сделку по этапу и/или назначить ответственного (PATCH).
+
+        Частичное обновление: шлём только заданные поля. Пусто — не ходим в CRM."""
+        telo: dict = {}
+        if status_id is not None:
+            telo["status_id"] = status_id
+        if responsible_id is not None:
+            telo["responsible_user_id"] = responsible_id
+        if not telo:
+            return
+        await self._patch(f"/api/v4/leads/{lead_id}", telo)
 
 
 # ── Раздача 50/50 ────────────────────────────────────────────────────────────
@@ -219,6 +293,64 @@ async def otpravit_lead_po_id(cfg: AmoRestConfig, redis, fabrika_sessiy,
                 return await otpravit_lead(api, redis, sessiya, lead, kod)
     except Exception as e:  # noqa: BLE001
         log_oshibka(f"amoCRM: отправка лида #{lead_id} упала: {e}")
+        return False
+
+
+async def peredat_dialog_menedzheru(cfg: AmoRestConfig, redis, *, kod: str,
+                                    conv_uuid: str | None, vyzhimka: str) -> bool:
+    """Передать ГОРЯЧИЙ диалог менеджеру без телефона (14.11): двигаем сделку
+    из «Неразобранного» на «Первичный контакт», назначаем ответственного 50/50
+    и ставим задачу. Точка входа из ядра.
+
+    Клиент созрел на разговор (согласился на созвон, «беру», «выезжайте на замер»),
+    но номер не оставил — на Авито это норма: менеджер продолжит прямо в чате
+    (исходящие уже умеем, 14.9). Раньше такой чат навсегда висел в «Неразобранном»
+    ничей — это и чиним.
+
+    Порядок: найти сделку чата по `conv_uuid` (его положило зеркало в Redis) и
+    двинуть её. Не нашли (маппинга нет — старый чат, или Redis лёг) → создаём новую
+    сделку на «Первичном контакте», чтобы менеджер клиента всё равно получил. Всё
+    обёрнуто: передача не роняет диалог, сбой идёт в лог (как у `otpravit_lead`).
+    """
+    if cfg is None or not cfg.zapolnen:
+        return False
+    try:
+        async with AmoAPI(cfg) as api:
+            responsible = await vybrat_menedzhera(redis, kod)
+            target = await api.nayti_sdelku_po_chatu(conv_uuid) if conv_uuid else None
+            if target:
+                lead_id = target["lead_id"]
+                if target["status_id"] == STATUS_NERAZOBRANNOE:
+                    await api.dvinut_sdelku(lead_id, status_id=STATUS_PERVICHNY,
+                                            responsible_id=responsible)
+                    logger.info("📇 amoCRM: сделка %s (аккаунт %s) из «Неразобранного» → "
+                                "«Первичный контакт», ответственный %s", lead_id, kod, responsible)
+                elif not target["responsible_id"]:
+                    await api.dvinut_sdelku(lead_id, responsible_id=responsible)
+                    logger.info("📇 amoCRM: сделке %s (аккаунт %s) назначен ответственный %s "
+                                "(уже вне «Неразобранного»)", lead_id, kod, responsible)
+                else:
+                    responsible = target["responsible_id"]   # уважим текущего — ему и задача
+                    logger.info("📇 amoCRM: сделка %s (аккаунт %s) уже в работе у %s — "
+                                "добавляю задачу", lead_id, kod, responsible)
+            else:
+                sozd = await api.sozdat_sdelku(
+                    imya_sdelki=_imya_sdelki(kod, None), imya_kontakta=None,
+                    telefon=None, status_id=STATUS_PERVICHNY, responsible_id=responsible)
+                lead_id = sozd["lead_id"]
+                if not lead_id:
+                    raise OshibkaAmo("amoCRM не вернул id сделки")
+                logger.info("📇 amoCRM: у чата нет сделки в «Неразобранном» — создал новую %s "
+                            "(аккаунт %s, ответственный %s)", lead_id, kod, responsible)
+            if vyzhimka:
+                await api.dobavit_primechanie(lead_id, vyzhimka)
+            await api.sozdat_zadachu(
+                lead_id, responsible,
+                "Клиент с Авито готов к разговору — свяжитесь и ответьте в чате Авито")
+            return True
+    except Exception as e:  # noqa: BLE001 — передача не роняет диалог
+        log_oshibka(f"amoCRM: передача диалога менеджеру (аккаунт {kod}, "
+                    f"чат {conv_uuid}) не удалась: {e}")
         return False
 
 

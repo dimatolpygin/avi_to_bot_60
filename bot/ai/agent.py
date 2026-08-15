@@ -323,6 +323,11 @@ def pravila_stilya(imya: str, kompaniya: str, *, zhenskiy_rod: bool = True,
   заново, мы уже записали.
 - Клиент просит расчёт или подбор, которого ты сделать не можешь, — скажи, что посчитаем
   и вернёмся с ответом. Контакт как условие ответа не требуй никогда.
+- Клиент СОЗРЕЛ (готов оформлять, говорит «беру», просит перезвонить, просит расчёт под
+  объект, торгуется о финальной цене) — вызови инструмент peredat_menedzheru: подключишь
+  живого коллегу, и он продолжит с клиентом прямо в этой переписке. Телефон для этого НЕ
+  нужен и просить его не надо — это отдельный шаг от save_lead. Скажи клиенту обычной
+  репликой, что подключаешь коллегу и с ним свяжутся.
 
 ТЫ И ЕСТЬ МЕНЕДЖЕР. Про себя и фирму говори «я» и «мы». Не «менеджер вам позвонит»,
 а «{svyazhemsya}»; не «менеджер посчитает», а «посчитаем»; не «передам менеджеру»,
@@ -449,6 +454,48 @@ INSTRUMENT_LEAD = {
                 },
             },
             "required": ["telefon", "vyzhimka"],
+        },
+    },
+}
+
+#: Передача ГОРЯЧЕГО диалога менеджеру БЕЗ телефона (14.11). Даётся всем аккаунтам.
+#: Отдельный инструмент от save_lead: тот — про оставленный контакт, этот — про
+#: готовность клиента к разговору, когда номера нет. На Авито это норма: менеджер
+#: продолжит прямо в чате. КОНТАКТ ЭТИМ ИНСТРУМЕНТОМ НЕ ПРОСИМ — иначе вернётся
+#: баг №1 (клянчанье телефона); в описании это сказано прямо.
+INSTRUMENT_PEREDACHA = {
+    "type": "function",
+    "function": {
+        "name": "peredat_menedzheru",
+        "description": (
+            "Передать разговор живому менеджеру, когда клиент СОЗРЕЛ к предметному "
+            "шагу: согласился на звонок, просит перезвонить, говорит «беру»/«готов "
+            "оформлять», просит выехать на замер, торгуется о финальной цене. Телефон "
+            "для этого НЕ нужен и просить его НЕ надо — менеджер ответит клиенту прямо "
+            "здесь, в этой же переписке. Вызывай ОДИН раз, когда клиент действительно "
+            "готов, а не на любой вопрос. После вызова обычной репликой скажи клиенту, "
+            "что передаёшь коллеге и с ним свяжутся — не «менеджер позвонит», ты сама "
+            "и есть менеджер, просто подключаешь коллегу по этому запросу."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "prichina": {
+                    "type": "string",
+                    "description": "Коротко, почему передаёшь: «согласен на звонок», "
+                                   "«готов к замеру», «торг о цене», «готов оформлять».",
+                },
+                "vyzhimka": {
+                    "type": "string",
+                    "description": (
+                        "О чём был разговор — три-четыре фразы для коллеги, который "
+                        "переписку не читал: что клиент хочет, какие называл размеры, "
+                        "сорта, объём парной, бюджет, сроки, о чём договорились и что "
+                        "осталось. Только то, что реально прозвучало, не додумывай."
+                    ),
+                },
+            },
+            "required": ["prichina", "vyzhimka"],
         },
     },
 }
@@ -683,7 +730,7 @@ class OtvetAgenta:
 async def otvetit(cfg: OpenRouterConfig, poisk: Poisk | None, istoriya: list[dict],
                   tekst_klienta: str, data_praysa: str = "",
                   sistemny: str | None = None,
-                  peredat_lead=None) -> OtvetAgenta:
+                  peredat_lead=None, peredat_dialog=None) -> OtvetAgenta:
     """Ответ на реплику клиента.
 
     `istoriya` — предыдущие реплики диалога (`role`/`content`); хранит её
@@ -705,8 +752,10 @@ async def otvetit(cfg: OpenRouterConfig, poisk: Poisk | None, istoriya: list[dic
             raise ValueError("Без поиска системный промпт обязателен: "
                              "у аккаунта услуг его собирать не из чего")
         sistemny = sobrat_prompt(poisk.katalog)
+    # Поиск — только у товарного аккаунта; save_lead и передача менеджеру — у всех.
     instrumenty = ([*INSTRUMENTY, INSTRUMENT_LEAD] if poisk is not None
                    else [INSTRUMENT_LEAD])
+    instrumenty = [*instrumenty, INSTRUMENT_PEREDACHA]
     soobshcheniya: list[dict] = [
         {"role": "system", "content": sistemny},
         *istoriya,
@@ -715,6 +764,7 @@ async def otvetit(cfg: OpenRouterConfig, poisk: Poisk | None, istoriya: list[dic
     zaprosy_poiska: list[str] = []
     naydeno = 0
     lead_peredan = False
+    dialog_peredan = False   # передан ли диалог менеджеру за этот ход (14.11)
     forsirovano = False      # предохранитель срабатывает не больше раза за ход
     forsim_seychas = False
 
@@ -736,6 +786,19 @@ async def otvetit(cfg: OpenRouterConfig, poisk: Poisk | None, istoriya: list[dic
                 if imya_instrumenta == "save_lead":
                     otvet_instrumenta = await _peredat_lead(vyzov, peredat_lead)
                     lead_peredan = lead_peredan or otvet_instrumenta.get("передан", False)
+                    soobshcheniya.append({
+                        "role": "tool", "tool_call_id": vyzov["id"],
+                        "content": json.dumps(otvet_instrumenta, ensure_ascii=False),
+                    })
+                    continue
+
+                if imya_instrumenta == "peredat_menedzheru":
+                    # Даётся всем аккаунтам (в т.ч. услугам без поиска), поэтому
+                    # обрабатываем ДО ветки «инструмента нет». Повторный вызов за один
+                    # ход — no-op: одна передача на реплику достаточно.
+                    otvet_instrumenta = await _peredat_dialog(
+                        vyzov, peredat_dialog, uzhe=dialog_peredan)
+                    dialog_peredan = dialog_peredan or otvet_instrumenta.get("передан", False)
                     soobshcheniya.append({
                         "role": "tool", "tool_call_id": vyzov["id"],
                         "content": json.dumps(otvet_instrumenta, ensure_ascii=False),
@@ -878,6 +941,36 @@ async def _peredat_lead(vyzov: dict, peredat_lead) -> dict:
         log_oshibka(f"Лид не передан ({telefon}): {e}")
         return {"передан": False, "пометка": "Всё равно скажи клиенту, что мы свяжемся."}
     return {"передан": True, "пометка": "Скажи клиенту, что передала менеджеру."}
+
+
+async def _peredat_dialog(vyzov: dict, peredat_dialog, *, uzhe: bool) -> dict:
+    """Вызов `peredat_menedzheru` → передача горячего диалога наружу (14.11).
+
+    Как и лид, уходит колбэком (`bot/core.py`): agent.py про CRM не знает. Телефон
+    здесь НЕ участвует — передаём сам факт готовности клиента и выжимку. Повтор за
+    один ход глушим (`uzhe`): одной передачи на реплику достаточно.
+    """
+    if uzhe:
+        return {"передан": True, "пометка": "Уже передала, просто ответь клиенту."}
+    try:
+        args = json.loads(vyzov["function"]["arguments"])
+    except (json.JSONDecodeError, KeyError, TypeError):
+        log_oshibka("Битые аргументы peredat_menedzheru — диалог не передан")
+        return {"передан": False, "ошибка": "Аргументы не разобраны, позови ещё раз."}
+
+    prichina = (args.get("prichina") or "").strip() or "клиент готов к разговору"
+    vyzhimka = (args.get("vyzhimka") or "").strip()
+
+    log_tool_call("peredat_menedzheru", {"причина": prichina}, "передаю диалог менеджеру")
+    if peredat_dialog is None:
+        logger.info("🤝 ПЕРЕДАЧА МЕНЕДЖЕРУ (без телефона) · %s | %s", prichina, vyzhimka)
+        return {"передан": True, "пометка": "Скажи клиенту, что подключаешь коллегу и с ним свяжутся."}
+    try:
+        await peredat_dialog(prichina, vyzhimka)
+    except Exception as e:  # noqa: BLE001 — передача не роняет ответ клиенту
+        log_oshibka(f"Диалог не передан менеджеру ({prichina}): {e}")
+        return {"передан": False, "пометка": "Всё равно скажи клиенту, что подключаешь коллегу."}
+    return {"передан": True, "пометка": "Скажи клиенту, что подключаешь коллегу и с ним свяжутся."}
 
 
 def _razobrat_vyzov(vyzov: dict) -> tuple[str, bool]:

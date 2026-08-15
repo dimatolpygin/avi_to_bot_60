@@ -61,7 +61,7 @@ def zhivye_avito(cfg: Config) -> list[str]:
 
 
 def _kanal_avito(kod: str, cfg: Config, yadro: Yadro, stop: asyncio.Event,
-                 operatory=None):
+                 operatory=None, redis=None):
     """Фабрика запуска поллера Авито по режиму `AVITO_REZHIM`.
 
     off сюда не доходит (отфильтрован раньше). nablyudenie — только лог,
@@ -88,7 +88,7 @@ def _kanal_avito(kod: str, cfg: Config, yadro: Yadro, stop: asyncio.Event,
             from .profili import profil
             ref = cfg.bot_ref_id(kod)   # amojo_id менеджера аккаунта (14.9-C)
             async with AmojoAPI(cfg.amojo) as amojo:
-                z = Zerkalo(amojo, kod, profil(kod).menedzher, bot_ref_id=ref)
+                z = Zerkalo(amojo, kod, profil(kod).menedzher, bot_ref_id=ref, redis=redis)
                 logger.info("🪞 Авито «%s»: диалог зеркалируется в amoCRM%s", kod,
                             " (клиент+бот)" if ref else " (пока только входящие клиента)")
                 await avito.zapustit(kod, acc, yadro, stop, belyy_spisok=spisok,
@@ -192,7 +192,8 @@ async def main() -> None:
             _supervise(kod, _kanal_telegram(kod, cfg.telegram_tokeny[kod], yadro)), name=kod)
             for kod in zhivye]
         tasks += [asyncio.create_task(
-            _supervise(f"avito-{kod}", _kanal_avito(kod, cfg, yadro, stop, operatory)),
+            _supervise(f"avito-{kod}", _kanal_avito(kod, cfg, yadro, stop, operatory,
+                                                    redis_client)),
             name=f"avito-{kod}")
             for kod in avito_kody]
 
