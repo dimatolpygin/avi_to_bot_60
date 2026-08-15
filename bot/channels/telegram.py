@@ -18,6 +18,7 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.filters import Command, CommandStart
 from aiogram.types import Message
 
+from .avito import _PROSBA_TEKSTOM
 from ..chelovek.dispetcher import Kanal
 from ..core import Yadro
 from ..logger import log_ishodyashchee, log_oshibka, logger, nachat_zapros
@@ -85,8 +86,7 @@ def sobrat_bota(kod: str, token: str, yadro: Yadro) -> tuple[Bot, AiogramDispatc
         """Фото, голосовые, файлы. Авито их тоже присылает, и молчать нельзя."""
         with nachat_zapros(kod):
             logger.info("👤 @%s (id:%s) → вложение без текста", _imya_klienta(m), m.chat.id)
-            tekst = ("Вложение вижу, но прочитать его не могу. Напишите, пожалуйста, "
-                     "текстом, что нужно.")
+            tekst = _PROSBA_TEKSTOM
             await m.answer(tekst)
             log_ishodyashchee(_imya_klienta(m), tekst, meta="[вложение]")
 
