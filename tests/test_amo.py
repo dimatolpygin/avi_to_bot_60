@@ -210,7 +210,7 @@ def _router(*, chats, leads, patch_zahvat=None):
             return httpx.Response(200, json={"_embedded": {"chats": chats}})
         if p.startswith("/api/v4/contacts/"):
             ids = [{"id": lid} for lid in leads]
-            return httpx.Response(200, json={"_embedded": {"leads": ids}})
+            return httpx.Response(200, json={"name": "Иван", "_embedded": {"leads": ids}})
         tail = p.rsplit("/", 1)[1]
         if request.method == "GET" and p.startswith("/api/v4/leads/") and tail.isdigit():
             d = leads[int(tail)]
@@ -291,6 +291,7 @@ async def test_peredat_dialog_dvigaet_neraz_i_stavit_zadachu():
     assert ok is True
     assert zahvat["telo"]["status_id"] == STATUS_PERVICHNY     # двинули из Неразобранного
     assert zahvat["telo"]["responsible_user_id"] in (6783360, 1356618)
+    assert zahvat["telo"]["name"] == "Авито · Иван"            # понятное имя, не «Сделка #id»
 
 
 async def test_peredat_dialog_folbek_sozdaet_sdelku():

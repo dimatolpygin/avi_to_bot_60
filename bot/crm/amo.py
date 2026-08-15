@@ -168,6 +168,7 @@ class AmoAPI:
         if not contact_id:
             return None
         kont = await self._get(f"/api/v4/contacts/{contact_id}", {"with": "leads"})
+        imya = kont.get("name") if isinstance(kont, dict) else None
         lead_ids = [l.get("id") for l in
                     (kont.get("_embedded", {}).get("leads", []) if isinstance(kont, dict) else [])
                     if l.get("id")]
@@ -177,22 +178,28 @@ class AmoAPI:
             if not isinstance(lead, dict) or lead.get("pipeline_id") != VORONKA_SAUNA:
                 continue
             info = {"lead_id": lid, "status_id": lead.get("status_id"),
-                    "responsible_id": lead.get("responsible_user_id") or 0}
+                    "responsible_id": lead.get("responsible_user_id") or 0,
+                    "imya": imya}
             if lead.get("status_id") == STATUS_NERAZOBRANNOE:
                 return info                    # идеальная цель — её и двигаем
             kandidat = kandidat or info        # уже в работе — запасной вариант
         return kandidat
 
     async def dvinut_sdelku(self, lead_id: int, *, status_id: int | None = None,
-                            responsible_id: int | None = None) -> None:
-        """Сдвинуть сделку по этапу и/или назначить ответственного (PATCH).
+                            responsible_id: int | None = None,
+                            imya_sdelki: str | None = None) -> None:
+        """Сдвинуть сделку по этапу, назначить ответственного и/или переименовать (PATCH).
 
-        Частичное обновление: шлём только заданные поля. Пусто — не ходим в CRM."""
+        Частичное обновление: шлём только заданные поля. Пусто — не ходим в CRM.
+        `imya_sdelki` нужен, чтобы у перенесённой из «Неразобранного» авто-сделки
+        было понятное имя «Авито · …», а не дефолтное «Сделка #id» (14.11)."""
         telo: dict = {}
         if status_id is not None:
             telo["status_id"] = status_id
         if responsible_id is not None:
             telo["responsible_user_id"] = responsible_id
+        if imya_sdelki:
+            telo["name"] = imya_sdelki
         if not telo:
             return
         await self._patch(f"/api/v4/leads/{lead_id}", telo)
@@ -220,8 +227,15 @@ async def vybrat_menedzhera(redis, kod: str) -> int:
 
 # ── Оркестрация: строка leads → сделка в amoCRM ──────────────────────────────
 
+# Служебные имена, которые amojo даёт контакту, когда реальное имя клиента не
+# пришло. Не тащим их в имя сделки — иначе выходит «Авито · Авито Клиент».
+_SLUZHEBNYE_IMENA = {"клиент", "клиент авито", "авито клиент"}
+
+
 def _imya_sdelki(kod: str, imya: str | None) -> str:
-    kto = imya or "клиент"
+    kto = (imya or "").strip()
+    if not kto or kto.lower() in _SLUZHEBNYE_IMENA:
+        kto = "клиент"
     return f"Авито · {kto}"
 
 
@@ -321,8 +335,11 @@ async def peredat_dialog_menedzheru(cfg: AmoRestConfig, redis, *, kod: str,
             if target:
                 lead_id = target["lead_id"]
                 if target["status_id"] == STATUS_NERAZOBRANNOE:
+                    # Заодно даём понятное имя: авто-сделка «Неразобранного» звалась
+                    # «Сделка #id» — по ней не видно, что клиент с Авито.
                     await api.dvinut_sdelku(lead_id, status_id=STATUS_PERVICHNY,
-                                            responsible_id=responsible)
+                                            responsible_id=responsible,
+                                            imya_sdelki=_imya_sdelki(kod, target.get("imya")))
                     logger.info("📇 amoCRM: сделка %s (аккаунт %s) из «Неразобранного» → "
                                 "«Первичный контакт», ответственный %s", lead_id, kod, responsible)
                 elif not target["responsible_id"]:
