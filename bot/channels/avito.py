@@ -475,14 +475,50 @@ async def zapustit(kod: str, cfg: AvitoConfig, yadro, stop: asyncio.Event, *,
                                     operatory=operatory), stop)
 
 
+async def _zerkalit_operatora(zerkalo, operatory, kod: str, chat_id: str,
+                              avtor_id, msgs: list[dict]) -> None:
+    """Ручные ответы менеджера в Авито → исходящие в amoCRM (14.12).
+
+    Идём по исходящим окна сообщений в хронологии: реплики самого бота уже ушли
+    в amoCRM при отправке (`_kanal_avito`), их пропускаем по журналу; чужое
+    исходящее — ответ живого менеджера прямо в Авито, в карточке его не было.
+    Зеркалим и помечаем (`zapomnit_zerkalirovannoe`), чтобы на следующем тике не
+    задублить. Текстовые только: операторские вложения без публичного url amojo
+    подтянуть не может (как и у клиента, см. `vhodyashchee_vlozhenie`).
+
+    Зовётся ТОЛЬКО когда бот в чате уже отметился (`aktiven`): на холодном старте
+    журнал пуст, и всё прошлое исходящее приняли бы за операторское и разом
+    залили бы историю в карточку. Дедуп и края (пустой id, сбой кеша) — в
+    `Operatory.operator_zerkalen`: там перекос в «не зеркалить», чтобы не дублить."""
+    ishodyashchie = sorted(
+        (m for m in msgs if isinstance(m, dict) and m.get("direction") == "out"),
+        key=lambda m: m.get("created") or 0)
+    for m in ishodyashchie:
+        mid = m.get("id")
+        if await operatory.bot_otpravlyal(kod, chat_id, mid):
+            continue
+        if await operatory.operator_zerkalen(kod, chat_id, mid):
+            continue
+        tekst = ((m.get("content") or {}).get("text")) or ""
+        if not tekst.strip():
+            continue
+        await zerkalo.ishodyashchee(chat_id, tekst, avtor_id=avtor_id,
+                                    msgid=f"avito-out:{mid}")
+        await operatory.zapomnit_zerkalirovannoe(kod, chat_id, mid)
+        logger.info("📤 amoCRM ← оператор (чат %s): зеркалирован ручной ответ менеджера",
+                    chat_id)
+
+
 async def _operator_perehvatil(operatory, kod: str, api: AvitoAPI,
-                               chat_id: str) -> bool:
+                               chat_id: str, *, msgs: list[dict] | None = None) -> bool:
     """Ведёт ли чат живой менеджер — бот должен молчать (14.8).
 
     Флаг уже стоит → молчим. Иначе смотрим последнее исходящее в чате: если его
     отправил не бот (нет в журнале реплик) — менеджер перехватил диалог, ставим
     флаг. Сбой запроса за сообщениями не должен глушить бота: не удалось
     проверить — считаем, что перехвата нет (флаг ставится только по факту).
+    `msgs` — уже загруженное окно сообщений (обработчик берёт его один раз и на
+    зеркалирование оператора, и сюда); None → грузим сами.
 
     ⚠️ Холодный старт: если журнал реплик бота в чате пуст (`aktiven` = False),
     последнее исходящее могло быть репликой самого бота ДО включения 14.8 — тогда
@@ -496,7 +532,9 @@ async def _operator_perehvatil(operatory, kod: str, api: AvitoAPI,
         logger.info("🙋 Авито «%s»: чат %s ведёт оператор — бот молчит", kod, chat_id)
         return True
     try:
-        posl = posledny_ishodyashchiy(await api.soobshcheniya(chat_id))
+        if msgs is None:
+            msgs = await api.soobshcheniya(chat_id)
+        posl = posledny_ishodyashchiy(msgs)
     except Exception as e:  # noqa: BLE001 — детекция не роняет обработку
         log_oshibka(f"Оператор: детекция перехвата в чате {chat_id}: {e}")
         return False
@@ -538,6 +576,22 @@ def sdelat_obrabotchik(kod: str, api: AvitoAPI, yadro,
                         kod, v.chat_id)
             return
         imya = f"avito:{v.author_id}" if v.author_id else f"avito:{v.chat_id}"
+        # Окно сообщений тянем один раз: и на зеркалирование ручных ответов
+        # менеджера (14.12), и на детекцию перехвата (14.8) ниже. Ручные ответы
+        # зеркалим ДО разбора входящего — менеджер видит в карточке всю переписку,
+        # а не только реплики бота и клиента; только когда бот в чате уже
+        # отметился (иначе холодный старт залил бы историю, см. `_zerkalit_operatora`).
+        msgs: list[dict] | None = None
+        if operatory is not None:
+            try:
+                msgs = await api.soobshcheniya(v.chat_id)
+            except Exception as e:  # noqa: BLE001 — не смогли окно: без зеркала оператора
+                log_oshibka(f"Оператор: окно сообщений чата {v.chat_id}: {e}")
+                msgs = None
+            if (zerkalo is not None and msgs is not None
+                    and await operatory.aktiven(kod, v.chat_id)):
+                await _zerkalit_operatora(zerkalo, operatory, kod, v.chat_id,
+                                          v.author_id, msgs)
         if v.tekst is None:
             # Вложение без текста (14.9). Сперва зеркалим его в amoCRM и журнал —
             # менеджер увидит фото клиента даже если бот под оператором молчит;
@@ -574,7 +628,7 @@ def sdelat_obrabotchik(kod: str, api: AvitoAPI, yadro,
         # Перехват оператором (14.8): менеджер ответил вручную → бот молчит. Вопрос
         # клиента уже зеркалирован и в журнале — менеджер его увидит в панели и amo.
         if operatory is not None and await _operator_perehvatil(
-                operatory, kod, api, v.chat_id):
+                operatory, kod, api, v.chat_id, msgs=msgs):
             return
         # Объявление кладём ДО обработки: ядро подмешает его в промпт по ключу.
         yadro.zapomnit_obyavlenie(kod, v.chat_id, v.obyavlenie)

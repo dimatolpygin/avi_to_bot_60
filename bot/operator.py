@@ -31,6 +31,7 @@ from .logger import log_oshibka
 
 _PREFIKS_FLAG = "sbavito:operator"       # :{kod}:{chat} → "1", пока ведёт оператор
 _PREFIKS_BOT = "sbavito:botmsg"          # :{kod}:{chat} → список id реплик бота
+_PREFIKS_ZERK = "sbavito:opzerk"         # :{kod}:{chat} → id операторских реплик, уже в amoCRM
 _HRANIT_ID = 50                          # сколько последних id реплик бота помним
 TTL_VOZVRATA_S = 3 * 24 * 3600           # 3 суток тишины → бот включается сам
 
@@ -53,6 +54,7 @@ class Operatory:
         self._chasy = chasy or time.time
         self._flagi: dict[str, float] = {}            # фолбэк без Redis: key → истечёт в
         self._otpravleno: dict[str, list[str]] = {}
+        self._zerkaleno: dict[str, list[str]] = {}
 
     @staticmethod
     def _kl_flag(kod, chat) -> str:
@@ -61,6 +63,10 @@ class Operatory:
     @staticmethod
     def _kl_bot(kod, chat) -> str:
         return f"{_PREFIKS_BOT}:{kod}:{chat}"
+
+    @staticmethod
+    def _kl_zerk(kod, chat) -> str:
+        return f"{_PREFIKS_ZERK}:{kod}:{chat}"
 
     # ── Флаг перехвата ───────────────────────────────────────────────────────
 
@@ -168,3 +174,41 @@ class Operatory:
         except Exception as e:  # noqa: BLE001
             log_oshibka(f"Оператор: не прочитал журнал реплик {klyuch}: {e}")
             return True
+
+    # ── Журнал зеркалированных операторских реплик (дедуп 14.12) ──────────────
+
+    async def operator_zerkalen(self, kod, chat, msg_id) -> bool:
+        """Уже зеркалировали это ручное исходящее менеджера в amoCRM?
+
+        Дедуп для 14.12: без него на каждом тике поллинга «последнее исходящее
+        менеджера» отправлялось бы в карточку заново. Осторожно к краю: без id
+        дедупить нечем, а сбой кеша не даёт проверить — в обоих случаях возвращаем
+        True («уже зеркалено» → пропускаем). В живой карточке клиента лучше
+        потерять зеркало одной реплики, чем задублить переписку."""
+        if not msg_id:
+            return True
+        klyuch = self._kl_zerk(kod, chat)
+        if self._redis is None:
+            return str(msg_id) in self._zerkaleno.get(klyuch, [])
+        try:
+            spisok = await self._redis.lrange(klyuch, 0, -1)
+            return str(msg_id) in [_dekod(x) for x in spisok]
+        except Exception as e:  # noqa: BLE001
+            log_oshibka(f"Оператор: не прочитал журнал зеркалирования {klyuch}: {e}")
+            return True
+
+    async def zapomnit_zerkalirovannoe(self, kod, chat, msg_id) -> None:
+        """Пометить операторскую реплику как уже ушедшую в amoCRM (дедуп 14.12)."""
+        if not msg_id:
+            return
+        klyuch = self._kl_zerk(kod, chat)
+        if self._redis is None:
+            spisok = self._zerkaleno.setdefault(klyuch, [])
+            spisok.append(str(msg_id))
+            del spisok[:-_HRANIT_ID]
+            return
+        try:
+            await self._redis.rpush(klyuch, str(msg_id))
+            await self._redis.ltrim(klyuch, -_HRANIT_ID, -1)
+        except Exception as e:  # noqa: BLE001
+            log_oshibka(f"Оператор: не записал id зеркалирования {klyuch}: {e}")

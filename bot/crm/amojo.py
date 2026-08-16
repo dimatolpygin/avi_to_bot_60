@@ -297,19 +297,23 @@ class Zerkalo:
             log_oshibka(f"amoCRM зеркало (вложение, чат {chat_id}): {e}")
 
     async def ishodyashchee(self, chat_id: str, tekst: str, *, avtor_id=None,
-                            imya_klienta: str | None = None) -> None:
-        """Ответ бота → исходящее в amoCRM (sender=бот, receiver=клиент).
+                            imya_klienta: str | None = None,
+                            msgid: str | None = None) -> None:
+        """Ответ бота ИЛИ ручной ответ менеджера → исходящее в amoCRM
+        (sender=бот, receiver=клиент).
 
         Без `bot_ref_id` amojo отклоняет исходящее (нужен UUID пользователя
         amoCRM у отправителя), поэтому пока его нет — тихо пропускаем, чтобы не
-        сыпать ошибками. Реплики бота подключатся в 14.4 с OAuth-токеном amoCRM.
+        сыпать ошибками. `msgid` можно задать (14.12: для ручных реплик менеджера
+        передаём id сообщения Авито — тогда повторная отправка того же id для
+        amojo идемпотентна); по умолчанию — уникальный по времени id реплики бота.
         """
         if self.bot_ref_id is None:
             return
         try:
             await self.api.new_message(payload_soobshcheniya(
                 conversation_id=self._dialog(chat_id),
-                msgid=f"bot:{int(time.time() * 1000)}",
+                msgid=msgid or f"bot:{int(time.time() * 1000)}",
                 sender=self._bot(),
                 receiver=self._klient(chat_id, avtor_id, imya_klienta),
                 tekst=tekst))

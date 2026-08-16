@@ -352,6 +352,102 @@ async def test_kanal_zapominaet_otpravlennoe():
     assert await op.bot_otpravlyal("saunamart", "c1", "bot-42") is True
 
 
+# ── Зеркалирование ручных ответов менеджера в amoCRM (14.12) ──────────────────
+
+class _FakeZerkalo:
+    """Ловит вызовы зеркала amoCRM (без сети)."""
+
+    def __init__(self):
+        self.vhodyashchie = []       # (chat, tekst)
+        self.ishodyashchie = []      # (chat, tekst, msgid)
+
+    async def vhodyashchee(self, chat_id, msg_id, avtor_id, tekst, *, imya=None):
+        self.vhodyashchie.append((chat_id, tekst))
+
+    async def vhodyashchee_vlozhenie(self, chat_id, msg_id, avtor_id, vlozhenie, *, imya=None):
+        pass
+
+    async def ishodyashchee(self, chat_id, tekst, *, avtor_id=None, imya_klienta=None, msgid=None):
+        self.ishodyashchie.append((chat_id, tekst, msgid))
+
+
+def _out(mid, text, created=100):
+    return {"id": mid, "direction": "out", "created": created, "content": {"text": text}}
+
+
+async def test_operatorskiy_otvet_zerkalitsya_v_amo():
+    """Ручной ответ менеджера в Авито (чужое исходящее) уходит в карточку amoCRM."""
+    op = Operatory(FakeRedis())
+    await op.zapomnit_otpravlennoe("saunamart", "c1", "bot-old")   # бот тут говорил
+    api = _FakeAPI(soobshcheniya=[_out("mgr-1", "Оставьте номер, перезвоним")])
+    ya, zerk = _FakeYadro(), _FakeZerkalo()
+    obr = sdelat_obrabotchik("saunamart", api, ya, None, zerkalo=zerk, operatory=op)
+
+    await obr(_vhod(chat_id="c1", text="а доставка?"))
+
+    assert zerk.ishodyashchie == [("c1", "Оставьте номер, перезвоним", "avito-out:mgr-1")]
+    assert ya.obrabotano == []                              # перехват заглушил бота
+    assert await op.vedet("saunamart", "c1") is True
+
+
+async def test_operatorskiy_otvet_ne_dublitsya_na_sleduyushchem_tike():
+    op = Operatory(FakeRedis())
+    await op.zapomnit_otpravlennoe("saunamart", "c1", "bot-old")
+    api = _FakeAPI(soobshcheniya=[_out("mgr-1", "Оставьте номер")])
+    ya, zerk = _FakeYadro(), _FakeZerkalo()
+    obr = sdelat_obrabotchik("saunamart", api, ya, None, zerkalo=zerk, operatory=op)
+
+    await obr(_vhod(chat_id="c1", text="раз"))
+    await obr(_vhod(chat_id="c1", msg_id="m2", text="два"))     # то же окно, тот же mgr-1
+
+    assert len(zerk.ishodyashchie) == 1                     # зеркалировано ровно раз
+
+
+async def test_novyy_operatorskiy_otvet_zerkalitsya_pod_flagom():
+    """Флаг уже стоит, а менеджер написал ещё — новая реплика тоже уходит в amoCRM."""
+    op = Operatory(FakeRedis())
+    await op.zapomnit_otpravlennoe("saunamart", "c1", "bot-old")
+    ya, zerk = _FakeYadro(), _FakeZerkalo()
+    # 1-й тик: mgr-1
+    api1 = _FakeAPI(soobshcheniya=[_out("mgr-1", "Первый ответ", 100)])
+    await sdelat_obrabotchik("saunamart", api1, ya, None, zerkalo=zerk, operatory=op)(
+        _vhod(chat_id="c1", text="раз"))
+    # 2-й тик: менеджер добавил mgr-2 (флаг перехвата уже стоит)
+    api2 = _FakeAPI(soobshcheniya=[_out("mgr-1", "Первый ответ", 100),
+                                   _out("mgr-2", "Второй ответ", 200)])
+    await sdelat_obrabotchik("saunamart", api2, ya, None, zerkalo=zerk, operatory=op)(
+        _vhod(chat_id="c1", msg_id="m2", text="два"))
+
+    assert [t for _, t, _ in zerk.ishodyashchie] == ["Первый ответ", "Второй ответ"]
+
+
+async def test_svoi_repliki_bota_ne_zerkalyatsya_povtorno():
+    """Исходящее самого бота уже ушло в amoCRM при отправке — второй раз не шлём."""
+    op = Operatory(FakeRedis())
+    await op.zapomnit_otpravlennoe("saunamart", "c1", "bot-7")
+    api = _FakeAPI(soobshcheniya=[_out("bot-7", "Ответ бота")])
+    ya, zerk = _FakeYadro(), _FakeZerkalo()
+    obr = sdelat_obrabotchik("saunamart", api, ya, None, zerkalo=zerk, operatory=op)
+
+    await obr(_vhod(chat_id="c1", text="ещё"))
+
+    assert zerk.ishodyashchie == []                         # своё не дублируем
+    assert ya.obrabotano == [("saunamart", "c1", "ещё")]    # бот отвечает
+
+
+async def test_holodny_start_ne_zalivaet_istoriyu_v_amo():
+    """Журнал пуст (aktiven=False): прошлые исходящие в amoCRM разом не льём."""
+    op = Operatory(FakeRedis())
+    api = _FakeAPI(soobshcheniya=[_out("staraya-1", "старое 1", 90),
+                                  _out("staraya-2", "старое 2", 100)])
+    ya, zerk = _FakeYadro(), _FakeZerkalo()
+    obr = sdelat_obrabotchik("saunamart", api, ya, None, zerkalo=zerk, operatory=op)
+
+    await obr(_vhod(chat_id="c1", text="привет"))
+
+    assert zerk.ishodyashchie == []                         # историю не зеркалим
+
+
 # ── Панель: статус оператора и возврат бота ───────────────────────────────────
 
 class _Rezult:

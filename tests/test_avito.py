@@ -404,6 +404,9 @@ class _FakeAPI:
     async def otpravit(self, chat_id, tekst):
         self.otpravleno.append((chat_id, tekst))
 
+    async def soobshcheniya(self, chat_id, *, limit=20):
+        return []
+
 
 async def test_belyy_spisok_propuskaet_tolko_svoi_chaty():
     ya, api = _FakeYadro(), _FakeAPI()
@@ -451,6 +454,9 @@ class _ApiSId:
     async def otpravit(self, chat_id, tekst):
         self.otpravleno.append((chat_id, tekst))
         return {"id": "p1"}
+
+    async def soobshcheniya(self, chat_id, *, limit=20):
+        return []
 
 
 def _chat_foto():
