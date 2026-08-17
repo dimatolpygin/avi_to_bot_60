@@ -569,7 +569,14 @@ def sdelat_obrabotchik(kod: str, api: AvitoAPI, yadro,
     обёртка `_kanal_avito`. Вложение (текста нет, 14.9) зеркалим в amoCRM как
     media и кладём маркер в журнал (менеджер видит фото); ядру не отдаём —
     прочитать картинку бот не может, поэтому просим клиента написать текстом.
+
+    `poprosili_tekst` — чаты, где мы уже попросили описать словами и ждём текст.
+    Пачка вложений подряд или бэклог сообщений без текста после простоя иначе
+    даёт залп одинаковых просьб (поймано на проде 17.08: ~10 «интернет слабый»
+    подряд). Просим ОДИН раз, до первого текстового ответа клиента.
     """
+    poprosili_tekst: set[str] = set()
+
     async def obrabotchik(v: Vhodyashchee) -> None:
         if belyy_spisok is not None and v.chat_id not in belyy_spisok:
             logger.info("🔇 Авито «%s»: чат %s не в белом списке — пропускаю",
@@ -609,11 +616,19 @@ def sdelat_obrabotchik(kod: str, api: AvitoAPI, yadro,
                 logger.info("🙋 Авито «%s»: вложение в чате %s, но ведёт оператор — молчу",
                             kod, v.chat_id)
                 return
+            # Уже просили текстом и ждём ответа — не долбим повторно. Фото/маркер
+            # выше уже ушли в amoCRM и журнал (менеджер видит каждое вложение), а
+            # клиенту хватит одной просьбы на пачку.
+            if v.chat_id in poprosili_tekst:
+                logger.info("👤 Авито «%s»: ещё вложение без текста в чате %s — "
+                            "уже просили словами, молчу", kod, v.chat_id)
+                return
             # Просьбу текстом гоним через ТОТ ЖЕ канал, что и обычные ответы бота:
             # она уходит клиенту, зеркалится в amoCRM (менеджер видит ответ бота, а
             # не только фото) и журналится. Главное — её id пишется в журнал
             # оператора: иначе следующее сообщение клиента детектор примет за ответ
             # живого менеджера и ложно заглушит бота.
+            poprosili_tekst.add(v.chat_id)
             await _kanal_avito(api, v.chat_id, imya, zerkalo=zerkalo,
                                avtor_id=v.author_id, zhurnal=zhurnal,
                                operatory=operatory, kod=kod).otpravit(_PROSBA_TEKSTOM)
@@ -621,6 +636,9 @@ def sdelat_obrabotchik(kod: str, api: AvitoAPI, yadro,
                         "зеркалю и прошу текстом", kod,
                         (v.vlozhenie or {}).get("tip") or "?", v.chat_id)
             return
+        # Клиент ответил текстом — снимаем «ждём описание словами», можно снова
+        # попросить, если дальше опять пришлёт только вложение.
+        poprosili_tekst.discard(v.chat_id)
         if zerkalo is not None:
             await zerkalo.vhodyashchee(v.chat_id, v.msg_id, v.author_id, v.tekst)
         if zhurnal is not None:

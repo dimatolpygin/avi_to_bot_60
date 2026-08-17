@@ -484,6 +484,24 @@ async def test_vlozhenie_pod_operatorom_molchit():
     assert op.zapomneno == []
 
 
+async def test_pachka_vlozheniy_prosit_tekstom_odin_raz():
+    # Пачка вложений подряд (или бэклог после простоя) — одна просьба, не залп.
+    ya, api = _FakeYadro(), _ApiSId()
+    obr = sdelat_obrabotchik("sbsauna", api, ya, None)
+
+    def foto(mid):
+        return {"id": "c1", "last_message": {"id": mid, "direction": "in", "content": {}}}
+
+    for mid in ("m1", "m2", "m3"):
+        await obr(izvlech_vhodyashchee(foto(mid)))
+    assert len(api.otpravleno) == 1                       # одна просьба на всю пачку
+
+    # Клиент ответил текстом → флаг снят, следующее вложение снова вправе попросить.
+    await obr(izvlech_vhodyashchee(_chat_vhod(chat_id="c1", text="вот описание")))
+    await obr(izvlech_vhodyashchee(foto("m4")))
+    assert len(api.otpravleno) == 2
+
+
 async def test_obyavlenie_zapominaetsya_pered_obrabotkoy():
     ya, api = _FakeYadro(), _FakeAPI()
     obr = sdelat_obrabotchik("sbsauna", api, ya, None)
