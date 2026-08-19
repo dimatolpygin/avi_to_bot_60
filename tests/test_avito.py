@@ -13,7 +13,8 @@ import pytest
 
 from bot.channels.avito import (AvitoAPI, OshibkaAvito, Vidennye, Vhodyashchee,
                                  _sobrat_vhodyashchie, cikl_pollinga,
-                                 izvlech_vhodyashchee, sdelat_obrabotchik)
+                                 izvlech_vhodyashchee, posledny_vhodyashchiy,
+                                 sdelat_obrabotchik)
 from bot.config import AvitoConfig
 
 CFG = AvitoConfig(client_id="cid", client_secret="sec", user_id=23598618)
@@ -169,6 +170,29 @@ async def test_sobrat_otbrasyvaet_ishodyashchie():
                        _msg("o1", text="наш ответ", direction="out", created=101)])
     vhod = await _sobrat_vhodyashchie(api, _chat_vhod(chat_id="c1"))
     assert [v.msg_id for v in vhod] == ["m1"]                    # исходящее — мимо
+
+
+def test_sistemnoe_soobshchenie_ne_stanovitsya_vhodyashchim():
+    # Служебное сообщение Авито (с текстом!) — не реплика клиента: в ядро не идёт.
+    chat = {"id": "c1", "last_message": {"id": "s1", "direction": "in",
+            "type": "system", "content": {"text": "Объявление снято с публикации"}}}
+    assert izvlech_vhodyashchee(chat) is None
+
+
+async def test_sobrat_propuskaet_sistemnye():
+    api = _FakeMsgApi([_msg("s1", text="Вы получили отзыв", tip="system", created=100),
+                       _msg("m2", text="здравствуйте", created=101)])
+    vhod = await _sobrat_vhodyashchie(api, _chat_vhod(chat_id="c1"))
+    assert [v.msg_id for v in vhod] == ["m2"]                    # системное — мимо
+
+
+def test_posledny_vhodyashchiy_ignoriruet_sistemnye():
+    # Служебное «после» фото не должно глушить просьбу: оно не считается за слово.
+    okno = [_foto_v_okne("m1", 100),
+            {"id": "s1", "direction": "in", "type": "system", "created": 200,
+             "content": {"text": "Пользователь запросил номер"}}]
+    posl = posledny_vhodyashchiy(okno)
+    assert posl is not None and posl["id"] == "m1"
 
 
 async def test_sobrat_zalp_foto_odnoy_sekundy_vse_prihodyat():
@@ -500,6 +524,63 @@ async def test_pachka_vlozheniy_prosit_tekstom_odin_raz():
     await obr(izvlech_vhodyashchee(_chat_vhod(chat_id="c1", text="вот описание")))
     await obr(izvlech_vhodyashchee(foto("m4")))
     assert len(api.otpravleno) == 2
+
+
+class _ApiOkno:
+    """Как _ApiSId, но `soobshcheniya` отдаёт заданное окно чата (для гейта
+    «фото — последнее слово клиента»)."""
+
+    def __init__(self, okno):
+        self.otpravleno = []
+        self._okno = okno
+
+    async def otpravit(self, chat_id, tekst):
+        self.otpravleno.append((chat_id, tekst))
+        return {"id": "p1"}
+
+    async def soobshcheniya(self, chat_id, *, limit=20):
+        return self._okno
+
+
+def _foto_v_okne(mid, created):
+    return {"id": mid, "direction": "in", "type": "image", "created": created,
+            "content": {"image": {"sizes": {"1280x960": "https://u/big.jpg"}}}}
+
+
+def test_posledny_vhodyashchiy_beret_svezhee_po_vremeni():
+    okno = [_foto_v_okne("m1", 100),
+            {"id": "m2", "direction": "in", "type": "text", "created": 200,
+             "content": {"text": "какой адрес офиса?"}},
+            {"id": "p1", "direction": "out", "created": 300, "content": {"text": "ответ"}}]
+    posl = posledny_vhodyashchiy(okno)
+    assert posl is not None and posl["id"] == "m2"          # исходящее не в счёт
+
+
+async def test_staroe_foto_pered_tekstom_ne_prosit_slovami():
+    # Баг «интернет слабый… опишите словами» не к месту: в чате старое фото, за
+    # которым клиент уже прислал текст. Фото не последнее слово → дежурной реплики
+    # НЕТ (текст ответится своим ходом), бот не выскакивает с просьбой про фото.
+    okno = [_foto_v_okne("m1", 100),
+            {"id": "m2", "direction": "in", "type": "text", "created": 200,
+             "content": {"text": "какой адрес офиса?"}}]
+    ya, api = _FakeYadro(), _ApiOkno(okno)
+    obr = sdelat_obrabotchik("sbsauna", api, ya, None)
+
+    await obr(izvlech_vhodyashchee(_chat_foto()))           # обрабатываем старое фото (m1)
+
+    assert api.otpravleno == []                             # молчим — фото не текущий вопрос
+    assert ya.obrabotano == []                              # ядру фото не отдаём
+
+
+async def test_svezhee_odinochnoe_foto_prosit_slovami():
+    # Обратная сторона: если фото — последнее слово клиента (он ждёт), просьба нужна.
+    okno = [_foto_v_okne("m1", 100)]
+    ya, api = _FakeYadro(), _ApiOkno(okno)
+    obr = sdelat_obrabotchik("sbsauna", api, ya, None)
+
+    await obr(izvlech_vhodyashchee(_chat_foto()))
+
+    assert api.otpravleno and "словами" in api.otpravleno[0][1]
 
 
 async def test_obyavlenie_zapominaetsya_pered_obrabotkoy():

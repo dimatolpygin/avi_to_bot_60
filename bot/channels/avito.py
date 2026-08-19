@@ -263,6 +263,13 @@ def _vhodyashchee_iz_soobshcheniya(chat_id: str, msg: dict,
     msg_id = msg.get("id")
     if not msg_id:
         return None
+    # Служебные сообщения Авито (`type == "system"`: снятие объявления, отзыв,
+    # предупреждение безопасности и т.п.) приходят как direction=in и НЕСУТ текст —
+    # из-за чего раньше уходили в ядро как реплики клиента, и бот отвечал на
+    # уведомления сервиса. Это не слово клиента: отбрасываем целиком (ни в ядро, ни
+    # под дежурную просьбу про фото).
+    if msg.get("type") == "system":
+        return None
     content = msg.get("content") or {}
     return Vhodyashchee(
         chat_id=chat_id,
@@ -326,6 +333,24 @@ def posledny_ishodyashchiy(soobshcheniya: list[dict]) -> dict | None:
         return None
     ishod.sort(key=lambda m: m.get("created") or 0)
     return ishod[-1]
+
+
+def posledny_vhodyashchiy(soobshcheniya: list[dict]) -> dict | None:
+    """Самое свежее ВХОДЯЩЕЕ сообщение чата (`direction == "in"`) или None.
+
+    По нему решаем, актуально ли вложение без текста: если ПОСЛЕ фото клиент уже
+    прислал что-то ещё (обычно текстовый вопрос), дежурную просьбу «опишите
+    словами» не шлём — это старое фото, а не текущий вопрос. Иначе на истории,
+    перечитанной после рестарта (дедуп `Vidennye` в памяти обнуляется), бот выдаёт
+    заглушку про фото не к месту — прямо перед нормальным ответом на текст.
+    Порядок выдачи Авито не гарантирован — сортируем по времени, свежее последним.
+    Служебные (`type == "system"`) — не слово клиента, их не учитываем."""
+    vh = [m for m in soobshcheniya if isinstance(m, dict)
+          and m.get("direction") == "in" and m.get("type") != "system"]
+    if not vh:
+        return None
+    vh.sort(key=lambda m: m.get("created") or 0)
+    return vh[-1]
 
 
 _VIDENNYH_NA_CHAT = 200      # сколько последних id держим на чат (защита от роста)
@@ -615,6 +640,21 @@ def sdelat_obrabotchik(kod: str, api: AvitoAPI, yadro,
                 await operatory.prodlit(kod, v.chat_id)
                 logger.info("🙋 Авито «%s»: вложение в чате %s, но ведёт оператор — молчу",
                             kod, v.chat_id)
+                return
+            # Просьбу «опишите словами» шлём ТОЛЬКО если это фото — текущее последнее
+            # слово клиента. Старое вложение (перечитано после рестарта) или фото, за
+            # которым клиент уже прислал текст, дежурной реплики не рождает: текст
+            # ответится своим ходом, а само фото уже ушло в amoCRM/журнал выше. Окно
+            # берём то же, что для перехвата оператором (14.8), либо тянем разово.
+            if msgs is None:
+                try:
+                    msgs = await api.soobshcheniya(v.chat_id)
+                except Exception as e:  # noqa: BLE001 — нет окна → шлём как раньше
+                    log_oshibka(f"Вложение: окно сообщений чата {v.chat_id}: {e}")
+            posl_vh = posledny_vhodyashchiy(msgs) if msgs else None
+            if posl_vh is not None and str(posl_vh.get("id")) != v.msg_id:
+                logger.info("👤 Авито «%s»: вложение в чате %s не последнее сообщение "
+                            "клиента — молчу (фото не текущий вопрос)", kod, v.chat_id)
                 return
             # Уже просили текстом и ждём ответа — не долбим повторно. Фото/маркер
             # выше уже ушли в amoCRM и журнал (менеджер видит каждое вложение), а
