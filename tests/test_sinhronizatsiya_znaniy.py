@@ -182,8 +182,9 @@ async def test_vyklyuchennyy_sink_nichego_ne_delaet(monkeypatch):
 async def test_akkaunt_bez_vkladki_propuskaetsya(monkeypatch):
     monkeypatch.setattr(sz, "prochitat_znaniya", _chitalka([BlokStroka("a", "A", "t")]))
     monkeypatch.setattr(sz, "zapisat_znaniya", _zapis(sz.ItogiZnaniy()))
-    r = await sz.sinhronizirovat_znaniya_odin_raz(_cfg(), object(), ["saunamart"])
-    assert r == {}   # у товарного вкладки знаний нет (Шаг 1)
+    # Код, которого нет в LISTY_ZNANIY (у всех трёх реальных аккаунтов вкладки уже есть).
+    r = await sz.sinhronizirovat_znaniya_odin_raz(_cfg(), object(), ["net_takoy_vkladki"])
+    assert r == {}   # нет вкладки знаний — аккаунт пропущен
 
 
 async def test_google_lyog_vozvrat_none_bez_perezagruzki(monkeypatch):

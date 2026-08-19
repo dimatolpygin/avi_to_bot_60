@@ -27,11 +27,14 @@ from dataclasses import dataclass
 from ..logger import logger
 from .google_prays import _syrye_stroki_google
 
-# Вкладка знаний по коду аккаунта. Шаг 1 — только услуги; товарный «Saunamart (1)»
-# подключается на Шаге 2 (сначала факты Saunamart выносятся из кода в блоки).
+# Вкладка знаний по коду аккаунта. Услуги (Шаг 1) + товарный «Saunamart (1)»
+# (Шаг 2: факты Saunamart вынесены из кода в блоки, `bot/znaniya_tovar.py`).
+# ⚠️ Вкладка ПРОМПТОВ товарного — «Saunamart (1)», а НЕ «Saunamart» (это каталог
+# товаров, его читает `google_prays`). Разные вкладки одной книги.
 LISTY_ZNANIY: dict[str, str] = {
     "sbsauna": "SB SAUNA",
     "sbsauna_deshman": "SB SAUNA Дешман",
+    "saunamart": "Saunamart (1)",
 }
 
 # Ключ блока — строго латиница (так же, как в коде и в схеме инструментов): по нему

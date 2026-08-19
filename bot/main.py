@@ -215,30 +215,36 @@ async def main() -> None:
         elif cfg.google.vklyuchena and cfg.google.katalog:
             logger.info("🔄 Синк каталога включён, но бот saunamart не поднят — синк не запускаю")
 
-        # Живая база знаний услуг из Google-таблицы (этап 19, Шаг 1): фоновый синк
-        # вкладок знаний в `knowledge_blocks` раз в ~10 минут + горячая перезагрузка
-        # промпта услуг в памяти (аналог синка каталога, но для аккаунтов услуг).
-        # Свой флаг `GOOGLE_ZNANIYA` (по умолчанию off): включается НЕЗАВИСИМО от
-        # каталога — правку промптов можно запустить, не активируя переход каталога.
-        # Синкаем только поднятые аккаунты услуг, у которых есть вкладка знаний.
+        # Живая база знаний из Google-таблицы (этап 19): фоновый синк вкладок
+        # знаний в `knowledge_blocks` раз в ~10 минут + горячая перезагрузка промпта
+        # в памяти (аналог синка каталога). Шаг 1 — услуги (SB SAUNA, Дешман),
+        # Шаг 2 — товарный (вкладка «Saunamart (1)»). Свой флаг `GOOGLE_ZNANIYA`
+        # (по умолчанию off): включается НЕЗАВИСИМО от каталога — правку промптов
+        # можно запустить, не активируя переход каталога. Синкаем только поднятые
+        # аккаунты, у которых есть вкладка знаний.
         from .profili import profil
         from .etl.google_znaniya import LISTY_ZNANIY
-        uslugi_up = [k for k in gotovit
-                     if not profil(k).tovarnyy and k in LISTY_ZNANIY]
-        if cfg.google.vklyuchena and cfg.google.znaniya and uslugi_up:
+        znaniya_up = [k for k in gotovit if k in LISTY_ZNANIY]
+        if cfg.google.vklyuchena and cfg.google.znaniya and znaniya_up:
             from . import sinhronizatsiya_znaniy
 
             async def _perezagruzit_znaniya(kod: str) -> None:
-                await yadro.perezagruzit_prompt_uslug(kod)
+                # Товарный и услуги перезагружаются по-разному: у товарного промпт
+                # держит и каталог, и блоки, у услуг — только блоки.
+                if profil(kod).tovarnyy:
+                    await yadro.perezagruzit_prompt_tovarnyy(kod)
+                else:
+                    await yadro.perezagruzit_prompt_uslug(kod)
 
             tasks.append(asyncio.create_task(
                 _supervise("синк-знаний",
                            lambda: sinhronizatsiya_znaniy.cikl_sinhronizatsii_znaniy(
-                               cfg, fabrika_sessiy, stop, uslugi_up,
+                               cfg, fabrika_sessiy, stop, znaniya_up,
                                posle_zapisi=_perezagruzit_znaniya)),
                 name="синк-знаний"))
-        elif cfg.google.vklyuchena and cfg.google.znaniya and not uslugi_up:
-            logger.info("📚 Синк знаний включён, но аккаунты услуг не подняты — синк не запускаю")
+        elif cfg.google.vklyuchena and cfg.google.znaniya and not znaniya_up:
+            logger.info("📚 Синк знаний включён, но аккаунты с вкладкой знаний не подняты — "
+                        "синк не запускаю")
 
         # Доотправка лидов, зависших с прошлого запуска (этап 14.4): amoCRM лежал —
         # строки в `leads` со status new/failed; при старте пробуем снова. Разовая

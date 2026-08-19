@@ -31,6 +31,8 @@ from .search.katalog import Katalog, iz_fayla_praysa, zagruzit_iz_bd
 from .search.pokrytie import proverit_pokrytie
 from .search.search import Poisk
 from .znaniya import prompt_iz_bd
+from .znaniya_tovar import KEY_PRIVETSTVIE
+from .znaniya_tovar import bloki_iz_bd as bloki_tovar_iz_bd
 
 
 class Yadro:
@@ -55,6 +57,9 @@ class Yadro:
         self._poiski: dict[str, Poisk] = {}
         self._prompty: dict[str, str] = {}
         self._data_praysa: dict[str, str] = {}
+        # Стартовое приветствие товарного аккаунта: дефолт из профиля, но блок
+        # `privetstvie` во вкладке «Saunamart (1)» его перекрывает (этап 19 Шаг 2).
+        self._privetstviya: dict[str, str] = {}
         # Объявление, под которым клиент пишет (Авито, этап 14): ключ диалога →
         # готовый факт для промпта. Заполняет адаптер Авито перед `obrabotat`,
         # читает замыкание `_otvechat`. У Telegram объявлений нет — словарь пуст.
@@ -80,9 +85,10 @@ class Yadro:
             katalog = await self._katalog(kod, fabrika_sessiy)
             poisk = Poisk(katalog)
             self._poiski[kod] = poisk
-            # Промпт собирается из каталога один раз: он не меняется от реплики
-            # к реплике, а список ассортимента в нём — из живых данных.
-            self._prompty[kod] = sobrat_prompt(katalog)
+            # Промпт собирается один раз: из каталога (ассортимент) и блоков знаний
+            # из БД (правки заказчика во вкладке «Saunamart (1)», этап 19 Шаг 2).
+            # Пустая/недоступная БД → код-фолбэк = прежний монолит.
+            self._prompty[kod] = await self._sobrat_tovar(kod, katalog)
             self._data_praysa[kod] = _data_praysa()
             logger.info("🧩 Аккаунт «%s»: каталог %d товаров, поиск подключён",
                         kod, len(katalog.gruppy))
@@ -99,6 +105,33 @@ class Yadro:
                 logger.warning("🧩 Каталог «%s» из БД не поднялся (%s) — беру файл прайса",
                                kod, e)
         return iz_fayla_praysa()
+
+    async def _sobrat_tovar(self, kod: str, katalog: Katalog) -> str:
+        """Промпт товарного аккаунта: скелет-механика + блоки знаний из БД + каталог.
+
+        Блоки правит заказчик во вкладке «Saunamart (1)» (этап 19 Шаг 2); отсюда
+        же берётся стартовое приветствие (`privetstvie`). Пустая или недоступная
+        база знаний → чистый код-фолбэк (`sobrat_prompt` без блоков), равный
+        монолиту до Шага 2: бот обязан подняться и без засеянной БД. Заодно
+        кладёт приветствие в кеш `_privetstviya` (его читает `zapomnit_privetstvie`).
+        """
+        bloki = None
+        if self._fabrika_sessiy is not None:
+            try:
+                async with self._fabrika_sessiy() as sessiya:
+                    bloki = await bloki_tovar_iz_bd(sessiya, kod)
+            except Exception as e:  # noqa: BLE001 — БД лежит, бот всё равно поднимается
+                logger.warning("🧩 Блоки товарного «%s» из БД не поднялись (%s) — код-фолбэк",
+                               kod, e)
+        if bloki:
+            self._privetstviya[kod] = bloki.get(KEY_PRIVETSTVIE) or profil(kod).privetstvie
+            logger.info("🧩 Аккаунт «%s»: промпт собран из базы знаний (блоков в БД: %d)",
+                        kod, len(bloki))
+            return sobrat_prompt(katalog, bloki)
+        self._privetstviya[kod] = profil(kod).privetstvie
+        logger.info("🧩 Аккаунт «%s»: база знаний пуста — промпт из код-фолбэка "
+                    "(запусти `python -m bot.seed_znaniya`)", kod)
+        return sobrat_prompt(katalog)
 
     async def perezagruzit_katalog(self, kod: str) -> bool:
         """Пересобрать поиск и промпт товарного аккаунта из БД БЕЗ рестарта.
@@ -135,7 +168,9 @@ class Yadro:
             return False
 
         novyy_poisk = Poisk(katalog)
-        novyy_prompt = sobrat_prompt(katalog)
+        # Промпт пересобираем из блоков БД (как на старте): свежий каталог даёт
+        # ассортимент, блоки — правки заказчика. Пусто/сбой → код-фолбэк.
+        novyy_prompt = await self._sobrat_tovar(kod, katalog)
         self._poiski[kod] = novyy_poisk
         self._prompty[kod] = novyy_prompt
         logger.info("🔄 Каталог «%s» перезагружен без рестарта: %d товаров, "
@@ -179,6 +214,44 @@ class Yadro:
             return False
         self._prompty[kod] = novyy
         logger.info("🔄 Промпт услуг «%s» перезагружен без рестарта из базы знаний", kod)
+        return True
+
+    async def perezagruzit_prompt_tovarnyy(self, kod: str) -> bool:
+        """Пересобрать промпт ТОВАРНОГО аккаунта из блоков БД БЕЗ рестарта.
+
+        Зовётся после синка знаний товарного (этап 19 Шаг 2), когда правку блока
+        во вкладке «Saunamart (1)» надо применить, не пересобирая поиск и не трогая
+        каталог. Каталог берём из живого `Poisk` (`poisk.katalog`) — он не менялся.
+
+        Под защитой, как перезагрузка услуг: пустая или не поднявшаяся база знаний
+        **не затирает** рабочий промпт (в отличие от старта, на код-фолбэк тут НЕ
+        откатываемся — при живой БД это была бы подмена свежих правок заглушкой).
+        Возвращает True, если подмена была.
+        """
+        prof = profil(kod)
+        if not prof.tovarnyy:
+            return False   # у услуг свой путь — perezagruzit_prompt_uslug
+        poisk = self._poiski.get(kod)
+        if poisk is None:
+            logger.warning("🔄 Перезагрузка промпта товарного «%s»: поиск не поднят — пропускаю", kod)
+            return False
+        if self._fabrika_sessiy is None:
+            logger.warning("🔄 Перезагрузка промпта товарного «%s»: нет фабрики сессий — пропускаю", kod)
+            return False
+        try:
+            async with self._fabrika_sessiy() as sessiya:
+                bloki = await bloki_tovar_iz_bd(sessiya, kod)
+        except Exception as e:  # noqa: BLE001 — обрыв БД, откат — не роняем бота
+            logger.error("🔄 Перезагрузка промпта товарного «%s» из БД не удалась (%s) — "
+                         "оставляю прежний", kod, e)
+            return False
+        if not bloki:
+            logger.warning("🔄 Перезагрузка промпта товарного «%s»: база знаний пуста — "
+                           "оставляю прежний", kod)
+            return False
+        self._prompty[kod] = sobrat_prompt(poisk.katalog, bloki)
+        self._privetstviya[kod] = bloki.get(KEY_PRIVETSTVIE) or prof.privetstvie
+        logger.info("🔄 Промпт товарного «%s» перезагружен без рестарта из базы знаний", kod)
         return True
 
     async def _prompt_uslug(self, prof: Profil, fabrika_sessiy) -> str:
@@ -330,10 +403,13 @@ class Yadro:
 
         Иначе на первый же вопрос модель представится второй раз: она не видит
         того, что транспорт отправил в обход неё.
+
+        Текст берём из кеша `_privetstviya` (у товарного он из блока `privetstvie`
+        вкладки «Saunamart (1)»), фолбэк — стартовое сообщение профиля.
         """
-        prof = profil(kod)
-        await self.pamyat.dopisat(Dispetcher.klyuch(kod, chat), "assistant", prof.privetstvie)
-        return prof.privetstvie
+        privet = self._privetstviya.get(kod) or profil(kod).privetstvie
+        await self.pamyat.dopisat(Dispetcher.klyuch(kod, chat), "assistant", privet)
+        return privet
 
     async def ostanovit(self) -> None:
         for d in self._dispetchery.values():

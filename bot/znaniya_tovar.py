@@ -270,3 +270,33 @@ def podstavit_bloki(shablon: str, bloki: dict[str, str]) -> str:
         out = out.replace(f"<<{key}>>", text)
     return out
 
+
+# Ключ стартового сообщения: правится во вкладке как блок, но в скелет НЕ
+# подставляется (маркера нет) — читается на старте как приветствие бота.
+KEY_PRIVETSTVIE = "privetstvie"
+
+
+async def bloki_iz_bd(sessiya, kod: str):
+    """Активные блоки товарного аккаунта из `knowledge_blocks` → {ключ: текст}.
+
+    Возвращает None, если аккаунта нет или блоков нет, — тогда вызывающий код
+    падает на дефолт (`sobrat_prompt` без блоков = прежний монолит). Так правка
+    блока в БД/вкладке «Saunamart (1)» меняет промпт, а незасеянная БД не гасит
+    бота. Параллель `znaniya.prompt_iz_bd` для услуг; модели тянем лениво.
+    """
+    from sqlalchemy import select
+
+    from .models import Account, KnowledgeBlock
+
+    account_id = await sessiya.scalar(select(Account.id).where(Account.code == kod))
+    if account_id is None:
+        return None
+    bloki_bd = (await sessiya.scalars(
+        select(KnowledgeBlock)
+        .where(KnowledgeBlock.account_id == account_id, KnowledgeBlock.is_active.is_(True))
+        .order_by(KnowledgeBlock.sort, KnowledgeBlock.id)
+    )).all()
+    if not bloki_bd:
+        return None
+    return {b.key: b.content for b in bloki_bd}
+
