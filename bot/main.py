@@ -246,6 +246,19 @@ async def main() -> None:
             logger.info("📚 Синк знаний включён, но аккаунты с вкладкой знаний не подняты — "
                         "синк не запускаю")
 
+        # Рубильник ответов из листа-пульта (запрос заказчика 19.08): НЕЗАВИСИМЫЙ
+        # синк — глушит/включает ответы бота per-account с Google-листа «Рубильник».
+        # Зеркало входящих в amoCRM при выключенном боте продолжает работать. Нужен
+        # только ключ Google (`GOOGLE_CREDS_PUT`) и флаг `GOOGLE_RUBILNIK` (дефолт on):
+        # не зависит от активации знаний/каталога. Нет листа → все отвечают (no-op).
+        if cfg.google.vklyuchena and cfg.google.rubilnik and gotovit:
+            from . import sinhronizatsiya_rubilnika
+            tasks.append(asyncio.create_task(
+                _supervise("синк-рубильника",
+                           lambda: sinhronizatsiya_rubilnika.cikl_sinhronizatsii_rubilnika(
+                               cfg, stop, gotovit, yadro.ustanovit_rubilnik)),
+                name="синк-рубильника"))
+
         # Доотправка лидов, зависших с прошлого запуска (этап 14.4): amoCRM лежал —
         # строки в `leads` со status new/failed; при старте пробуем снова. Разовая
         # задача, не под супервизором: отработала — завершилась.

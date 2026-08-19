@@ -277,6 +277,9 @@ class _FakeYadro:
     def obrabotat(self, kod, chat, tekst, kanal):
         self.obrabotano.append((chat, tekst, kanal))
 
+    def otvechaet(self, kod):
+        return True
+
 
 class _FakeAPI:
     def __init__(self):

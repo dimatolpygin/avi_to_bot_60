@@ -410,15 +410,19 @@ async def test_cikl_zovet_obrabotchik_odin_raz_na_soobshchenie():
 # ── Режим ответа: белый список, вложение, объявление (14.2) ───────────────────
 
 class _FakeYadro:
-    def __init__(self):
+    def __init__(self, otvechaet=True):
         self.obrabotano = []      # (kod, chat, tekst)
         self.obyavleniya = []     # (kod, chat, obyavlenie)
+        self._otvechaet = otvechaet
 
     def zapomnit_obyavlenie(self, kod, chat, obyavlenie):
         self.obyavleniya.append((kod, chat, obyavlenie))
 
     def obrabotat(self, kod, chat, tekst, kanal):
         self.obrabotano.append((kod, chat, tekst))
+
+    def otvechaet(self, kod):
+        return self._otvechaet
 
 
 class _FakeAPI:
@@ -581,6 +585,54 @@ async def test_svezhee_odinochnoe_foto_prosit_slovami():
     await obr(izvlech_vhodyashchee(_chat_foto()))
 
     assert api.otpravleno and "словами" in api.otpravleno[0][1]
+
+
+class _FakeZerkalo:
+    """Минимум для проверки, что входящее уходит в amoCRM даже при выкл. рубильнике."""
+
+    def __init__(self):
+        self.vhod = []
+        self.vhod_vlozh = []
+
+    async def vhodyashchee(self, chat_id, msg_id, author_id, tekst):
+        self.vhod.append((chat_id, tekst))
+
+    async def vhodyashchee_vlozhenie(self, chat_id, msg_id, author_id, vlozhenie, *, imya=None):
+        self.vhod_vlozh.append((chat_id, vlozhenie))
+
+    async def ishodyashchee(self, chat_id, tekst, *, avtor_id=None, msgid=None):
+        pass
+
+
+async def test_rubilnik_vykl_tekst_zerkalit_no_ne_otvechaet():
+    # Рубильник выключен: входящее уходит в amoCRM, но ядро не зовём и не отвечаем.
+    ya, api, zer = _FakeYadro(otvechaet=False), _FakeAPI(), _FakeZerkalo()
+    obr = sdelat_obrabotchik("sbsauna", api, ya, None, zerkalo=zer)
+
+    await obr(izvlech_vhodyashchee(_chat_vhod(chat_id="c1", text="какой адрес офиса?")))
+
+    assert ya.obrabotano == []                          # ядро не зван — бот молчит
+    assert api.otpravleno == []                         # клиенту ничего не ушло
+    assert zer.vhod == [("c1", "какой адрес офиса?")]   # но в amoCRM входящее ушло
+
+
+async def test_rubilnik_vkl_otvechaet_kak_obychno():
+    ya, api = _FakeYadro(otvechaet=True), _FakeAPI()
+    obr = sdelat_obrabotchik("sbsauna", api, ya, None)
+
+    await obr(izvlech_vhodyashchee(_chat_vhod(chat_id="c1", text="привет")))
+
+    assert ya.obrabotano == [("sbsauna", "c1", "привет")]
+
+
+async def test_rubilnik_vykl_foto_ne_prosit_slovami():
+    # Выключенный бот не шлёт даже заглушку «опишите словами», хотя фото — последнее.
+    ya, api = _FakeYadro(otvechaet=False), _ApiOkno([_foto_v_okne("m1", 100)])
+    obr = sdelat_obrabotchik("sbsauna", api, ya, None)
+
+    await obr(izvlech_vhodyashchee(_chat_foto()))
+
+    assert api.otpravleno == []
 
 
 async def test_obyavlenie_zapominaetsya_pered_obrabotkoy():

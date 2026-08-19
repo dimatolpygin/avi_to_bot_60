@@ -90,6 +90,11 @@ class GoogleConfig:
     # запустить, не активируя переход каталога на Google (он ждёт «да» заказчика).
     katalog: bool = True  # GOOGLE_KATALOG: синк каталога Saunamart (товары)
     znaniya: bool = False  # GOOGLE_ZNANIYA: синк базы знаний услуг (промпты)
+    # GOOGLE_RUBILNIK: синк листа-пульта (заказчик глушит ответы бота per-account).
+    # По умолчанию on — но, как и остальным, нужен ключ (`creds_put`); нет листа →
+    # все боты отвечают (дефолт True), это штатный no-op, а не ошибка.
+    rubilnik: bool = True
+    list_rubilnik: str = ""  # имя вкладки-пульта; пусто → дефолт из google_rubilnik
 
     @property
     def vklyuchena(self) -> bool:
@@ -221,6 +226,7 @@ def load_config() -> Config:
     # Дефолты id таблицы и листа живут в etl.google_prays (там же читалка) —
     # берём их оттуда, чтобы не задваивать реальный id в двух местах.
     from .etl.google_prays import LIST_PO_UMOLCHANIYU, TABLICA_ID_PO_UMOLCHANIYU
+    from .etl.google_rubilnik import LIST_RUBILNIK_PO_UMOLCHANIYU
 
     return Config(
         pg=PgConfig(
@@ -247,6 +253,10 @@ def load_config() -> Config:
                     not in {"off", "0", "false", "нет", "выкл"},
             znaniya=(os.environ.get("GOOGLE_ZNANIYA") or "off").strip().lower()
                     in {"on", "1", "true", "да", "yes", "вкл"},
+            rubilnik=(os.environ.get("GOOGLE_RUBILNIK") or "on").strip().lower()
+                    not in {"off", "0", "false", "нет", "выкл"},
+            list_rubilnik=(os.environ.get("GOOGLE_LIST_RUBILNIK") or "").strip()
+                    or LIST_RUBILNIK_PO_UMOLCHANIYU,
         ),
         log_level=(os.environ.get("LOG_LEVEL") or "info").strip().lower(),
         telegram_tokeny={

@@ -64,6 +64,11 @@ class Yadro:
         # готовый факт для промпта. Заполняет адаптер Авито перед `obrabotat`,
         # читает замыкание `_otvechat`. У Telegram объявлений нет — словарь пуст.
         self._obyavleniya: dict[str, str] = {}
+        # Рубильник ответов per-account (запрос заказчика 19.08): выключенный
+        # аккаунт по-прежнему зеркалит входящие в amoCRM и журнал, но САМ НЕ
+        # отвечает. Нет записи = отвечает (дефолт True). Значения ставит синк
+        # листа-пульта из Google-таблицы (`sinhronizatsiya_rubilnika`).
+        self._otvechaet: dict[str, bool] = {}
 
     # ── Подготовка ───────────────────────────────────────────────────────────
 
@@ -330,6 +335,26 @@ class Yadro:
             self._obyavleniya[klyuch] = fakt
         else:
             self._obyavleniya.pop(klyuch, None)
+
+    def otvechaet(self, kod: str) -> bool:
+        """Включён ли рубильник ответов для аккаунта. Нет записи → отвечает (True).
+
+        Адаптер канала спрашивает ЭТО перед тем, как отдать входящее ядру: False —
+        аккаунт заглушён с листа-пульта, бот молчит (но входящее уже зеркалено)."""
+        return self._otvechaet.get(kod, True)
+
+    def ustanovit_rubilnik(self, karta: dict[str, bool]) -> None:
+        """Применить состояние листа-пульта: {код: отвечает?}. Зовёт синк рубильника.
+
+        Логируем только СМЕНУ (заглушили/включили) — чтобы в логе был аудит, кто
+        когда выключил бота, но без шума на каждом тике синка."""
+        for kod, otvechaet in karta.items():
+            bylo = self._otvechaet.get(kod, True)
+            if bylo != otvechaet:
+                logger.info("🔌 Рубильник «%s»: бот %s (лист-пульт Google-таблицы)",
+                            kod, "ВКЛЮЧЁН — отвечает" if otvechaet else "ВЫКЛЮЧЕН — молчит, "
+                            "входящие идут в amoCRM")
+            self._otvechaet[kod] = otvechaet
 
     def _peredat_lead(self, kod: str, klyuch: str):
         """Куда уходит контакт, который клиент оставил сам.

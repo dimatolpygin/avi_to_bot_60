@@ -152,6 +152,7 @@ async def test_obrabotchik_zhurnalit_vhodyashchee():
     class _Yadro:
         def zapomnit_obyavlenie(self, *a): pass
         def obrabotat(self, *a): return None
+        def otvechaet(self, kod): return True
 
     obr = sdelat_obrabotchik("sbsauna", _ApiShpion(), _Yadro(),
                              frozenset({"u2i-abc"}), zhurnal=zh)
