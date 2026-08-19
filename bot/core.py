@@ -144,6 +144,43 @@ class Yadro:
         proverit_pokrytie(katalog, novyy_poisk.sl)
         return True
 
+    async def perezagruzit_prompt_uslug(self, kod: str) -> bool:
+        """Пересобрать промпт аккаунта услуг из базы знаний БД БЕЗ рестарта.
+
+        Зовётся после успешного фонового синка знаний (этап 19, Шаг 1): `Yadro`
+        собирает промпт услуг один раз при старте (`podgotovit` → `_prompty[kod]`)
+        и держит до рестарта, поэтому свежие блоки в `knowledge_blocks` для живого
+        бота бесполезны без этой перезагрузки.
+
+        Под защитой, как перезагрузка каталога: пустая или не поднявшаяся база
+        знаний **не затирает** рабочий промпт. Синк в БД мог пройти, а чтение
+        назад — упасть (обрыв) или вернуть пусто (гонка) — тогда оставляем прежний
+        промпт: ответить по чуть устаревшему лучше, чем без промпта. В отличие от
+        `_prompt_uslug`, на пустоту НЕ откатываемся на код-фолбэк — при живой БД
+        это была бы подмена свежих правок кодовой заглушкой. Возвращает True,
+        если подмена была.
+        """
+        prof = profil(kod)
+        if prof.tovarnyy:
+            return False   # у товарного промпт из каталога — см. perezagruzit_katalog
+        if self._fabrika_sessiy is None:
+            logger.warning("🔄 Перезагрузка промпта «%s»: нет фабрики сессий — пропускаю", kod)
+            return False
+        try:
+            async with self._fabrika_sessiy() as sessiya:
+                novyy = await prompt_iz_bd(sessiya, prof.kod, prof.kompaniya)
+        except Exception as e:  # noqa: BLE001 — обрыв БД, откат — не роняем бота
+            logger.error("🔄 Перезагрузка промпта «%s» из БД не удалась (%s) — "
+                         "оставляю прежний", kod, e)
+            return False
+        if not novyy:
+            logger.warning("🔄 Перезагрузка промпта «%s»: база знаний в БД пуста — "
+                           "оставляю прежний", kod)
+            return False
+        self._prompty[kod] = novyy
+        logger.info("🔄 Промпт услуг «%s» перезагружен без рестарта из базы знаний", kod)
+        return True
+
     async def _prompt_uslug(self, prof: Profil, fabrika_sessiy) -> str:
         """Промпт аккаунта услуг: из базы знаний в БД, а нет её — код-фолбэк.
 

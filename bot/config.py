@@ -85,9 +85,16 @@ class GoogleConfig:
     tablica_id: str
     list_name: str
     interval_s: int       # период фоновой синхронизации, сек
+    # Два НЕЗАВИСИМЫХ выключателя фич (этап 19): и тому, и другому нужен ключ
+    # (`creds_put`), но включаются они порознь. Так правку промптов услуг можно
+    # запустить, не активируя переход каталога на Google (он ждёт «да» заказчика).
+    katalog: bool = True  # GOOGLE_KATALOG: синк каталога Saunamart (товары)
+    znaniya: bool = False  # GOOGLE_ZNANIYA: синк базы знаний услуг (промпты)
 
     @property
     def vklyuchena(self) -> bool:
+        """Ключ задан → в Google вообще можно ходить (общий предохранитель обеих
+        фич). Что именно синкать — решают флаги `katalog`/`znaniya`."""
         return bool(self.creds_put.strip())
 
 
@@ -234,6 +241,12 @@ def load_config() -> Config:
             tablica_id=(os.environ.get("GOOGLE_TABLICA_ID") or "").strip() or TABLICA_ID_PO_UMOLCHANIYU,
             list_name=(os.environ.get("GOOGLE_LIST") or "").strip() or LIST_PO_UMOLCHANIYU,
             interval_s=_int("GOOGLE_SYNC_INTERVAL_S", 600),
+            # По умолчанию каталог ON (как раньше: ключ → каталог синкается),
+            # знания OFF (opt-in, чтобы не тронуть промпты без явного включения).
+            katalog=(os.environ.get("GOOGLE_KATALOG") or "on").strip().lower()
+                    not in {"off", "0", "false", "нет", "выкл"},
+            znaniya=(os.environ.get("GOOGLE_ZNANIYA") or "off").strip().lower()
+                    in {"on", "1", "true", "да", "yes", "вкл"},
         ),
         log_level=(os.environ.get("LOG_LEVEL") or "info").strip().lower(),
         telegram_tokeny={
