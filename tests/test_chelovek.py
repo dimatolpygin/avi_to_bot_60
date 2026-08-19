@@ -111,7 +111,7 @@ class Stend:
     """Диспетчер с подменённым отвечающим и каналом-запоминалкой."""
 
     def __init__(self, otvet="Есть, 513 рублей за штуку.", *, zaderzhka=0.0,
-                 padat=False, tempo=BYSTRO):
+                 padat=False, tempo=BYSTRO, tihiy_pri_sboe=False):
         self.otvety = otvet if isinstance(otvet, list) else [otvet]
         self.zaderzhka = zaderzhka
         self.padat = padat
@@ -120,7 +120,8 @@ class Stend:
         self.sobytiya: list[tuple[str, str]] = []   # («реплика»|«печатает», текст)
         self.klyuchi: list[str] = []                # ключ диалога, с которым позвали
         self.pamyat = PamyatVPamyati()
-        self.dispetcher = Dispetcher(self._otvetit, tempo=tempo, pamyat=self.pamyat)
+        self.dispetcher = Dispetcher(self._otvetit, tempo=tempo, pamyat=self.pamyat,
+                                     tihiy_pri_sboe=tihiy_pri_sboe)
         self.pervaya_replika = asyncio.Event()
 
     async def _otvetit(self, vopros: str, istoriya: list[dict], klyuch: str) -> str:
@@ -310,6 +311,31 @@ async def test_oshibka_otvechayushchego_daet_russkiy_folbek():
     istoriya = await s.istoriya()
     # Фолбэк лёг в историю: иначе там останутся два `user` подряд.
     assert [z["role"] for z in istoriya] == ["user", "assistant"]
+
+
+async def test_tihiy_pri_sboe_molchit_bez_folbeka():
+    """Флаг «молчать при сбое» (заказчик 20.08): ошибка ИИ / кончился баланс —
+    клиенту НИЧЕГО, в историю фолбэк не пишем (остаётся только вопрос клиента)."""
+    s = Stend(padat=True, tihiy_pri_sboe=True)
+    s.prinyat("липа три метра")
+    await s.dispetcher.dozhdatsya()
+    assert s.repliki == []                               # клиенту ничего не ушло
+    istoriya = await s.istoriya()
+    assert [z["role"] for z in istoriya] == ["user"]     # только вопрос, без assistant
+
+
+async def test_tihiy_pri_sboe_dialog_zhivoy_dalshe():
+    """После молчаливого сбоя бот отвечает на следующий вопрос как обычно, а два
+    вопроса клиента подряд склеились в памяти (провайдер не падает)."""
+    s = Stend(padat=True, tihiy_pri_sboe=True)
+    s.prinyat("липа три метра")
+    await s.dispetcher.dozhdatsya()
+    s.padat = False
+    s.prinyat("а полок есть?")
+    await s.dispetcher.dozhdatsya()
+    assert s.repliki[-1] == "Есть, 513 рублей за штуку."
+    istoriya = await s.istoriya()
+    assert istoriya[0] == {"role": "user", "content": "липа три метра\nа полок есть?"}
 
 
 async def test_posle_oshibki_dialog_zhivoy():

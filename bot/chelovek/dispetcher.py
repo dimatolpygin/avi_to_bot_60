@@ -98,11 +98,17 @@ class Dispetcher:
     """Приём сообщений, склейка пачки, ответ по-человечески."""
 
     def __init__(self, otvetchik: Otvetchik, *, tempo: Tempo | None = None,
-                 pamyat: Pamyat | None = None, folbek: str = FOLBEK) -> None:
+                 pamyat: Pamyat | None = None, folbek: str = FOLBEK,
+                 tihiy_pri_sboe: bool = False) -> None:
         self._otvetchik = otvetchik
         self.tempo = tempo or Tempo()
         self.pamyat: Pamyat = pamyat or PamyatVPamyati()
         self.folbek = folbek
+        # Молчать при сбое генерации (запрос заказчика 20.08): на ошибку ИИ — в т.ч.
+        # кончившийся баланс OpenRouter (402) — НЕ шлём клиенту заглушку «подвисло»,
+        # а молчим (только лог). Живой менеджер видит чат в amoCRM. По умолчанию
+        # False (старое поведение) — прод включает флагом из конфига.
+        self.tihiy_pri_sboe = tihiy_pri_sboe
         self._zadachi: dict[str, asyncio.Task] = {}
         self._ocheredi: dict[str, list[str]] = {}
         self._nachalo_pachki: dict[str, float] = {}
@@ -255,6 +261,14 @@ class Dispetcher:
             raise
         except Exception as e:            # noqa: BLE001 — падение одного диалога
             log_oshibka(f"Ответ не сформирован: {e}", zapros=vopros)
+            if self.tihiy_pri_sboe:
+                # Молчим: клиенту ничего, в историю ничего. Вопрос клиента уже в
+                # памяти (записан ДО генерации), а `dopisat` склеит два `user`
+                # подряд — так следующий вопрос не сломает провайдера. Смысл: при
+                # кончившемся балансе/сбое ИИ бот не спамит «подвисло», менеджер
+                # подхватит чат из amoCRM (входящее уже зеркалировано).
+                log_ishodyashchee(kanal.imya, "", meta="[молчу: сбой ИИ]")
+                return
             await kanal.otpravit(self.folbek)
             log_ishodyashchee(kanal.imya, self.folbek, meta="[фолбэк]")
             # Фолбэк тоже идёт в историю: без него в ней останутся два `user`

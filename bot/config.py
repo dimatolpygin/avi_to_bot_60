@@ -207,6 +207,10 @@ class Config:
     panel_api_token: str = ""
     panel_api_port: int = 8080
     panel_cors_origin: str = "*"
+    # Молчать при сбое генерации ИИ (запрос заказчика 20.08): на ошибку модели —
+    # в т.ч. кончившийся баланс OpenRouter — бот НЕ шлёт клиенту заглушку
+    # «подвисло», а молчит (менеджер подхватит из amoCRM). Дефолт on.
+    tihiy_pri_sboe: bool = True
 
     @property
     def debug_logi(self) -> bool:
@@ -286,6 +290,8 @@ def load_config() -> Config:
         panel_api_token=(os.environ.get("PANEL_API_TOKEN") or "").strip(),
         panel_api_port=_int("PANEL_API_PORT", 8080),
         panel_cors_origin=(os.environ.get("PANEL_CORS_ORIGIN") or "*").strip(),
+        tihiy_pri_sboe=(os.environ.get("AI_TIHIY_PRI_SBOE") or "on").strip().lower()
+                not in {"off", "0", "false", "нет", "выкл"},
     )
 
 

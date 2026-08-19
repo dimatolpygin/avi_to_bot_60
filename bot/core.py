@@ -292,7 +292,8 @@ class Yadro:
         """Диспетчер аккаунта. Свой на каждый: у них разные отвечающие."""
         if kod not in self._dispetchery:
             self._dispetchery[kod] = Dispetcher(
-                self._otvetchik(profil(kod)), tempo=self.tempo, pamyat=self.pamyat)
+                self._otvetchik(profil(kod)), tempo=self.tempo, pamyat=self.pamyat,
+                tihiy_pri_sboe=self.cfg.tihiy_pri_sboe)
         return self._dispetchery[kod]
 
     def _otvetchik(self, prof: Profil):
