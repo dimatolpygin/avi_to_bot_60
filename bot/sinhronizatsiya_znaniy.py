@@ -20,7 +20,10 @@
 - синхронизация НЕ трогает персону/шапку (`account_prompts`) — только блоки знаний;
   персона правится в БД (открытый вопрос роадмапа), сюда не входит;
 - удалённую из вкладки строку (сироту) НЕ гасим молча, а предупреждаем в лог:
-  выключать блок заказчик должен колонкой «Вкл» = «нет», а не удалением строки.
+  выключать блок заказчик должен колонкой «Вкл» = «нет», а не удалением строки;
+- СЛУЖЕБНЫЕ блоки услуг (`SLUZHEBNYE_KLYUCHI`: механика и предохранители) синк НЕ
+  трогает — во вкладке они стоят заглушкой, их текст остаётся из кода/сида, иначе
+  заглушка затёрла бы, например, запрет боту называть выдуманные цены.
 """
 from __future__ import annotations
 
@@ -31,8 +34,8 @@ from typing import Awaitable, Callable, Protocol
 from sqlalchemy import select
 
 from .config import Config
-from .etl.google_znaniya import (LISTY_ZNANIY, BlokStroka, OshibkaZnaniy,
-                                 prochitat_znaniya)
+from .etl.google_znaniya import (LISTY_ZNANIY, SLUZHEBNYE_KLYUCHI, BlokStroka,
+                                 OshibkaZnaniy, prochitat_znaniya)
 from .logger import logger
 
 # Колбэк «блоки аккаунта в БД обновились» — сюда main передаёт горячую
@@ -74,18 +77,25 @@ class Plan:
 
 
 def splanirovat(sushchestvuyushchie: dict[str, _Sushchestvuyushchiy],
-                vkladka: list[BlokStroka]) -> Plan:
+                vkladka: list[BlokStroka],
+                zashchishchennye: frozenset[str] = frozenset()) -> Plan:
     """Сверить блоки вкладки с блоками БД. Чистая функция — вся логика синка здесь.
 
     Порядок вкладки задаёт `sort` (шаг 10, как в сиде). Совпадение по ключу:
     поля не изменились → «без изменений»; изменились → в обновление; ключа в БД
     нет → во вставку. Ключи, что есть в БД активными, но пропали из вкладки, —
     «сироты» (в лог, не гасим): удаление строки не должно тихо ронять блок.
+
+    `zashchishchennye` — СЛУЖЕБНЫЕ (code-owned) ключи: механика/предохранители, во
+    вкладке стоящие заглушкой. Их НЕ вставляем и НЕ обновляем из вкладки (иначе
+    заглушка затёрла бы механику в БД) и сиротами не считаем (в БД они из сида).
     """
     plan = Plan()
     vo_vkladke: set[str] = set()
     for i, blok in enumerate(vkladka, start=1):
         vo_vkladke.add(blok.key)
+        if blok.key in zashchishchennye:
+            continue   # служебный блок: вкладка его не трогает, текст из кода/сида
         sort = i * 10
         cur = sushchestvuyushchie.get(blok.key)
         if cur is None:
@@ -96,7 +106,7 @@ def splanirovat(sushchestvuyushchie: dict[str, _Sushchestvuyushchiy],
         else:
             plan.obnovit.append((cur, blok, sort))
     plan.siroty = [k for k, v in sushchestvuyushchie.items()
-                   if k not in vo_vkladke and v.is_active]
+                   if k not in vo_vkladke and v.is_active and k not in zashchishchennye]
     return plan
 
 
@@ -121,7 +131,7 @@ async def zapisat_znaniya(vkladka: list[BlokStroka], kod: str, Sessiya) -> Itogi
             b.key: b for b in (await s.scalars(
                 select(KnowledgeBlock).where(KnowledgeBlock.account_id == account_id))).all()}
 
-        plan = splanirovat(sushchestvuyushchie, vkladka)
+        plan = splanirovat(sushchestvuyushchie, vkladka, SLUZHEBNYE_KLYUCHI)
 
         for blok, sort in plan.vstavit:
             s.add(KnowledgeBlock(account_id=account_id, key=blok.key, title=blok.title,

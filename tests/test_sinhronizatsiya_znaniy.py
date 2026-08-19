@@ -148,6 +148,45 @@ def test_vyklyuchennaya_sirota_ne_schitaetsya():
     assert plan.siroty == []
 
 
+# ── Служебные (code-owned) блоки: синк их не трогает ──────────────────────────
+
+def test_sluzhebnyy_blok_ne_obnovlyaetsya_iz_vkladki():
+    """Заглушка «[Служебный блок…]» во вкладке НЕ должна затирать механику в БД.
+    Это тот баг, что поймал живой прогон: без защиты запрет боту называть
+    выдуманные цены (`chego_ne_znaesh`) заменился бы одной строкой-заглушкой."""
+    est = {"chego_ne_znaesh": _bd("Чего не знаешь", "ПОЛНАЯ МЕХАНИКА ИЗ КОДА", 50, True)}
+    vkladka = [BlokStroka("chego_ne_znaesh", "Чего не знаешь", "[Служебный блок: …]", True)]
+    plan = sz.splanirovat(est, vkladka, sz.SLUZHEBNYE_KLYUCHI)
+    assert not plan.obnovit and not plan.vstavit   # не тронут
+    assert plan.siroty == []                        # и не сирота
+
+
+def test_sluzhebnyy_klyuch_ne_vstavlyaetsya():
+    """Служебного ключа нет в БД (не засеян) — из вкладки его тоже не заводим:
+    его канонический текст в коде, заглушку в БД писать нельзя."""
+    vkladka = [BlokStroka("kak_rabotat", "Как вести", "[Служебный блок: …]", True)]
+    plan = sz.splanirovat({}, vkladka, sz.SLUZHEBNYE_KLYUCHI)
+    assert not plan.vstavit and not plan.obnovit
+
+
+def test_fakticheskie_bloki_ryadom_so_sluzhebnymi_obnovlyayutsya():
+    """Защита касается ТОЛЬКО служебных: фактический блок рядом обновляется как обычно."""
+    est = {"chego_ne_znaesh": _bd("сл", "механика", 50, True),
+           "kontakty": _bd("Контакты", "старый адрес", 60, True)}
+    vkladka = [BlokStroka("chego_ne_znaesh", "сл", "[Служебный блок: …]", True),
+               BlokStroka("kontakty", "Контакты", "новый адрес", True)]
+    plan = sz.splanirovat(est, vkladka, sz.SLUZHEBNYE_KLYUCHI)
+    assert [b.key for _, b, _ in plan.obnovit] == ["kontakty"]
+
+
+def test_sluzhebnye_klyuchi_realny_v_bloki_uslug():
+    """Защита от дрейфа: все служебные ключи реально есть в блоках услуг."""
+    from bot.znaniya import bloki_akkaunta
+    for kod in ("sbsauna", "sbsauna_deshman"):
+        klyuchi = {b.key for b in bloki_akkaunta(kod)}
+        assert sz.SLUZHEBNYE_KLYUCHI <= klyuchi, kod
+
+
 # ── Оркестрация: лестница отказа и колбэк перезагрузки ───────────────────────
 
 def _cfg(vkl=True, interval=600):
