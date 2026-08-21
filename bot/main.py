@@ -187,6 +187,18 @@ async def main() -> None:
             logger.info("📩 Вебхук amoJo активен: реплика менеджера → клиенту в Авито "
                         "(%s) + перехват из amoCRM", ", ".join(avito_kody))
 
+        # Рубильник — ПЕРВЫЙ прогон СИНХРОННО, ДО подъёма поллеров (закалка гонки
+        # «рестарт при заглушённом боте»). Рубильник по умолчанию считает
+        # незнакомый аккаунт отвечающим, поэтому без этого на старте оставалось
+        # окно ~1–3с, пока фоновый синк не проставит «нет»: за него поллер успел бы
+        # вытащить висящий бэклог непрочитанных и ответить на него. Применяем
+        # состояние листа заранее — заглушённый аккаунт молчит с первой секунды.
+        # Сбой чтения листа безопасен: состояние не трогаем (см. модуль синка).
+        if cfg.google.vklyuchena and cfg.google.rubilnik and gotovit:
+            from . import sinhronizatsiya_rubilnika
+            await sinhronizatsiya_rubilnika.sinhronizirovat_rubilnik_odin_raz(
+                cfg, gotovit, yadro.ustanovit_rubilnik)
+
         _ustanovit_signaly(stop)
         tasks = [asyncio.create_task(
             _supervise(kod, _kanal_telegram(kod, cfg.telegram_tokeny[kod], yadro)), name=kod)
