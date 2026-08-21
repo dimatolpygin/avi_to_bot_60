@@ -30,6 +30,7 @@ class Profil:
 
     kod: str                 # saunamart | sbsauna | sbsauna_deshman
     kompaniya: str           # как называем фирму в диалоге
+    istochnik: str           # метка источника для amoCRM/панели (различает все 3)
     menedzher: str           # имя персоны из брифа
     tovarnyy: bool           # есть прайс → есть инструмент поиска
     privetstvie: str         # ответ на /start, он же первая реплика бота в истории
@@ -40,6 +41,7 @@ PROFILI: dict[str, Profil] = {
     "saunamart": Profil(
         kod="saunamart",
         kompaniya="Saunamart",
+        istochnik="Saunamart",
         menedzher="Александра",
         tovarnyy=True,
         # Стартовое сообщение. В брифе стояло «Вас приветствует компания Saunamart…»,
@@ -50,6 +52,7 @@ PROFILI: dict[str, Profil] = {
     "sbsauna": Profil(
         kod="sbsauna",
         kompaniya="SB SAUNA",
+        istochnik="SB SAUNA",
         menedzher="Роман",
         tovarnyy=False,
         privetstvie=("Вас приветствует компания SB SAUNA. Меня зовут Роман, я помогу вам "
@@ -60,6 +63,10 @@ PROFILI: dict[str, Profil] = {
     "sbsauna_deshman": Profil(
         kod="sbsauna_deshman",
         kompaniya="SB SAUNA",
+        # Отдельная метка источника: kompaniya у sbsauna и sbsauna_deshman одинаковая
+        # («SB SAUNA»), по ней два аккаунта не различить — а в amoCRM/панели их нужно
+        # видеть раздельно (бюджетное направление ≠ премиальное).
+        istochnik="SB SAUNA Дешман",
         # Персона для этого аккаунта в брифе не задана: заказчик заполнил два столбца,
         # Saunamart и SB SAUNA. Взят тот же Роман (фирма одна, направление другое);
         # с этапа 11 персона лежит в БД (`account_prompts`) и правится без кода.
@@ -80,3 +87,14 @@ def profil(kod: str) -> Profil:
     except KeyError:
         raise KeyError(f"Неизвестный аккаунт «{kod}». Известны: "
                        f"{', '.join(PROFILI)}") from None
+
+
+def istochnik_akkaunta(kod: str) -> str:
+    """Человекочитаемая метка источника аккаунта для витрин (amoCRM, панель).
+
+    ОДИН источник правды для обеих витрин: правка карты имён меняет и имя сделки
+    в amoCRM, и бейдж в панели разом. Неизвестный код — не роняем показ, отдаём
+    сам код (лид/чат важнее красивой метки; заведут аккаунт — добавят в PROFILI).
+    """
+    p = PROFILI.get(kod)
+    return p.istochnik if p is not None else kod

@@ -99,8 +99,11 @@ async function loadChats(){
       el.className = "chat";
       el.dataset.id = c.dialog_id;
       const opBadge = c.operator ? '<span class="op">оператор</span>' : '';
+      // Бейдж источника (этап 18): человекочитаемая метка из общей карты имён
+      // (Saunamart / SB SAUNA / SB SAUNA Дешман), фолбэк — сырой код аккаунта.
+      const acc = c.istochnik || c.account;
       el.innerHTML =
-        '<div class="top"><span class="who">'+esc(who)+'</span><span><span class="acc">'+esc(c.account)+'</span>'+opBadge+'</span></div>'+
+        '<div class="top"><span class="who">'+esc(who)+'</span><span><span class="acc">'+esc(acc)+'</span>'+opBadge+'</span></div>'+
         '<div class="prev">'+esc(c.preview||"")+'</div>'+
         '<div class="time">'+esc(fmt(c.last_message_at))+'</div>';
       el.onclick = () => { document.querySelectorAll(".chat").forEach(x=>x.classList.remove("active")); el.classList.add("active"); openDialog(c.dialog_id, who, !!c.operator); };

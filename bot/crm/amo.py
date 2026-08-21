@@ -26,6 +26,7 @@ from ..cache import PREFIKS
 from ..config import AmoRestConfig
 from ..logger import log_oshibka, logger
 from ..models import Account, Lead
+from ..profili import istochnik_akkaunta
 
 TAYMAUT_S = 30.0
 
@@ -233,10 +234,16 @@ _SLUZHEBNYE_IMENA = {"клиент", "клиент авито", "авито кл
 
 
 def _imya_sdelki(kod: str, imya: str | None) -> str:
+    """Имя сделки с источником аккаунта (этап 18): «Авито · <источник> · <клиент>».
+
+    Три аккаунта Авито льются в один канал amoCRM — без метки менеджер не поймёт,
+    чей лид и по какому направлению отвечать (Saunamart товары ≠ SB SAUNA услуги ≠
+    Дешман бюджет). Метку берём из общей карты `profili.istochnik_akkaunta`, чтобы
+    имя сделки и бейдж панели не разъехались."""
     kto = (imya or "").strip()
     if not kto or kto.lower() in _SLUZHEBNYE_IMENA:
         kto = "клиент"
-    return f"Авито · {kto}"
+    return f"Авито · {istochnik_akkaunta(kod)} · {kto}"
 
 
 async def otpravit_lead(api: AmoAPI, redis, sessiya, lead: Lead, kod: str) -> bool:

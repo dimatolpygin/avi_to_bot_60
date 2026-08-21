@@ -80,10 +80,21 @@ async def test_spisok_chatov_forma_i_poryadok():
     assert len(chaty) == 1
     c = chaty[0]
     assert c["dialog_id"] == 7 and c["account"] == "sbsauna"
+    assert c["istochnik"] == "SB SAUNA"          # метка источника (этап 18)
     assert c["channel"] == "avito" and c["chat_key"] == "u2i-abc"
     assert c["client_username"] == "avito:42"
     assert c["preview"] == "Чем помочь?"
     assert c["last_message_at"] == _T.isoformat()
+
+
+async def test_spisok_chatov_istochnik_razlichaet_deshman():
+    """В панели sbsauna и sbsauna_deshman должны получить РАЗНЫЕ метки (этап 18)."""
+    d = Dialog(id=8, account_id=2, channel="avito", chat_key="u2i-xyz")
+    d.last_message_at = _T
+    fab = _fabrika(_Rezult(stroki=[(d, "sbsauna_deshman", "Смета?")]))
+    c = (await api.spisok_chatov(fab))[0]
+    assert c["account"] == "sbsauna_deshman"
+    assert c["istochnik"] == "SB SAUNA Дешман"
 
 
 async def test_spisok_chatov_pusto():

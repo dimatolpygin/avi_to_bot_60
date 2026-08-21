@@ -15,10 +15,38 @@ import pytest
 from bot.config import AmoRestConfig
 from bot.crm import amo as amo_mod
 from bot.crm.amo import (STATUS_NERAZOBRANNOE, STATUS_PERVICHNY, VORONKA_SAUNA,
-                         AmoAPI, OshibkaAmo, otpravit_lead,
+                         AmoAPI, OshibkaAmo, _imya_sdelki, otpravit_lead,
                          peredat_dialog_menedzheru, vybrat_menedzhera)
 
 CFG = AmoRestConfig(base_url="https://sbcompany.amocrm.ru", access_token="T0KEN")
+
+
+# ── Метка источника аккаунта в имени сделки (этап 18) ────────────────────────
+
+def test_imya_sdelki_neset_istochnik_akkaunta():
+    assert _imya_sdelki("saunamart", "Иван") == "Авито · Saunamart · Иван"
+    assert _imya_sdelki("sbsauna", "Пётр") == "Авито · SB SAUNA · Пётр"
+
+
+def test_imya_sdelki_razlichaet_sbsauna_i_deshman():
+    """Ключевой критерий 18: два аккаунта услуг видны РАЗНЫМИ метками, хотя
+    kompaniya у них одинаковая («SB SAUNA»)."""
+    prem = _imya_sdelki("sbsauna", "Аня")
+    budg = _imya_sdelki("sbsauna_deshman", "Аня")
+    assert prem == "Авито · SB SAUNA · Аня"
+    assert budg == "Авито · SB SAUNA Дешман · Аня"
+    assert prem != budg
+
+
+def test_imya_sdelki_bez_imeni_i_sluzhebnoe_imya():
+    """Пустое/служебное имя клиента → «клиент», но источник остаётся."""
+    assert _imya_sdelki("saunamart", None) == "Авито · Saunamart · клиент"
+    assert _imya_sdelki("saunamart", "Авито Клиент") == "Авито · Saunamart · клиент"
+
+
+def test_imya_sdelki_neizvestny_kod_ne_ronyaet():
+    """Незнакомый код — не падаем, метка = сам код (фолбэк istochnik_akkaunta)."""
+    assert _imya_sdelki("новый_акк", "Иван") == "Авито · новый_акк · Иван"
 
 
 def _api(handler) -> AmoAPI:
@@ -291,7 +319,8 @@ async def test_peredat_dialog_dvigaet_neraz_i_stavit_zadachu():
     assert ok is True
     assert zahvat["telo"]["status_id"] == STATUS_PERVICHNY     # двинули из Неразобранного
     assert zahvat["telo"]["responsible_user_id"] in (6783360, 1356618)
-    assert zahvat["telo"]["name"] == "Авито · Иван"            # понятное имя, не «Сделка #id»
+    # Имя с источником аккаунта (этап 18): «Авито · <источник> · <клиент>».
+    assert zahvat["telo"]["name"] == "Авито · SB SAUNA · Иван"  # понятное имя, не «Сделка #id»
 
 
 async def test_peredat_dialog_folbek_sozdaet_sdelku():

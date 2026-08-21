@@ -29,6 +29,7 @@ from sqlalchemy import select
 
 from ..logger import logger, log_oshibka
 from ..models import Account, Dialog, Message
+from ..profili import istochnik_akkaunta
 
 # Крайняя длина списка чатов: панель показывает недавние, вся история — по клику
 # в конкретный диалог. Ограничение и защита от «отдать всю таблицу разом».
@@ -63,6 +64,7 @@ async def spisok_chatov(fabrika_sessiy, *, limit: int = _LIMIT_CHATOV) -> list[d
         {
             "dialog_id": d.id,
             "account": kod,
+            "istochnik": istochnik_akkaunta(kod),   # человекочитаемая метка (этап 18)
             "channel": d.channel,
             "chat_key": d.chat_key,
             "client_name": d.client_name,
