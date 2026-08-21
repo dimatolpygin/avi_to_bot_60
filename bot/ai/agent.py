@@ -529,13 +529,33 @@ PUSTO_PO_KANALU = {
                    "канал поиска."),
 }
 
+# Особый случай «не найдено, НО клиент пишет под активным объявлением» (этап 14).
+# Каталог поиска — не весь ассортимент аккаунта (у Saunamart 128 объявлений против
+# ~200 строк каталога: гималайская соль, трубы дымохода и пр. рекламируются, но в
+# базе поиска их нет). Раз объявление активно — товар в продаже, и «уточню у
+# поставщика»/«в прайсе нет» тут враньё. Эта пометка ЗАМЕНЯЕТ обычную «не найдено»,
+# чтобы результат инструмента не спорил с фактом объявления в системном промпте.
+# «Чужой домен» под объявлением НЕ смягчаем: унитаз под банным объявлением остаётся
+# чужим (гейт профиля выше).
+PUSTO_POD_OBYAVLENIEM = (
+    "В прайс-каталоге позиции нет, НО клиент пишет под нашим АКТИВНЫМ объявлением — "
+    "значит товар в продаже (в каталог занесены не все объявления аккаунта). НЕ говори "
+    "«у нас такого нет», «нет в прайсе/базе» и НЕ обещай «уточню у поставщика»: подтверди "
+    "наличие по объявлению (что это и цена — они в системном факте про объявление), "
+    "ответь как продавец и веди к заказу или контакту. Точные цену и характеристики "
+    "сверх объявления не выдумывай — если их нет, предложи уточнить.")
 
-def payload_poiska(nahodki: list[Nahodka], kanal: str, data_praysa: str) -> dict:
+
+def payload_poiska(nahodki: list[Nahodka], kanal: str, data_praysa: str,
+                   pod_obyavleniem: bool = False) -> dict:
     payload: dict = {"дата_актуальности_прайса": data_praysa, "канал_поиска": kanal}
     if not nahodki:
         payload["найдено"] = []
-        payload["пометка"] = PUSTO_PO_KANALU.get(
-            kanal, PUSTO_PO_KANALU["не найдено"])
+        if pod_obyavleniem and kanal != "чужой домен":
+            payload["пометка"] = PUSTO_POD_OBYAVLENIEM
+        else:
+            payload["пометка"] = PUSTO_PO_KANALU.get(
+                kanal, PUSTO_PO_KANALU["не найдено"])
         return payload
     payload["найдено"] = [_pozitsiya_v_payload(n) for n in nahodki]
     return payload
@@ -557,7 +577,8 @@ class OtvetAgenta:
 async def otvetit(cfg: OpenRouterConfig, poisk: Poisk | None, istoriya: list[dict],
                   tekst_klienta: str, data_praysa: str = "",
                   sistemny: str | None = None,
-                  peredat_lead=None, peredat_dialog=None) -> OtvetAgenta:
+                  peredat_lead=None, peredat_dialog=None,
+                  pod_obyavleniem: bool = False) -> OtvetAgenta:
     """Ответ на реплику клиента.
 
     `istoriya` — предыдущие реплики диалога (`role`/`content`); хранит её
@@ -573,6 +594,11 @@ async def otvetit(cfg: OpenRouterConfig, poisk: Poisk | None, istoriya: list[dic
     `peredat_lead(телефон, имя, выжимка)` — куда отдать контакт, когда клиент
     сам его оставил. Инструмент `save_lead` есть у ВСЕХ аккаунтов, включая
     услуги: прайса у них нет, а контакт есть всегда.
+
+    `pod_obyavleniem` (Авито) — клиент пишет под активным объявлением. Меняет
+    пометку пустой выдачи «не найдено»: под объявлением товар в продаже, поэтому
+    «уточню у поставщика»/«нет в прайсе» не говорим (см. `PUSTO_POD_OBYAVLENIEM`).
+    «Чужой домен» это не смягчает.
     """
     if sistemny is None:
         if poisk is None:
@@ -655,8 +681,9 @@ async def otvetit(cfg: OpenRouterConfig, poisk: Poisk | None, istoriya: list[dic
                               f"{naydeno} позиций")
                 soobshcheniya.append({
                     "role": "tool", "tool_call_id": vyzov["id"],
-                    "content": json.dumps(payload_poiska(nahodki, kanal, data_praysa),
-                                          ensure_ascii=False),
+                    "content": json.dumps(
+                        payload_poiska(nahodki, kanal, data_praysa, pod_obyavleniem),
+                        ensure_ascii=False),
                 })
             continue
 

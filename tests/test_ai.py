@@ -293,6 +293,25 @@ def test_pustaya_vydacha_razlichaet_kanaly(poisk):
     assert chuzhoy["пометка"] != net_takogo["пометка"]
 
 
+def test_pustaya_vydacha_pod_obyavleniem_ne_otshivaet(poisk):
+    """Под активным объявлением «не найдено» НЕ отшивает: товар в продаже,
+    «уточню у поставщика»/«нет в прайсе» не говорим (жалоба заказчика про
+    товары из объявлений, которых нет в каталоге — соль, трубы дымохода)."""
+    pod = agent.payload_poiska([], "не найдено", "", True)
+    assert pod["найдено"] == []
+    assert "в продаже" in pod["пометка"]
+    assert "уточню у поставщика" in pod["пометка"]   # в списке запрещённых фраз
+    assert pod["пометка"] != agent.payload_poiska([], "не найдено", "")["пометка"]
+
+
+def test_chuzhoy_domen_pod_obyavleniem_ne_smyagchaetsya(poisk):
+    """Чужой домен под объявлением остаётся жёстким отказом: унитаз под банным
+    объявлением — всё равно чужой профиль (гейт профиля выше объявления)."""
+    pod = agent.payload_poiska([], "чужой домен", "", True)
+    assert "не наш профиль" in pod["пометка"]
+    assert pod["пометка"] == agent.payload_poiska([], "чужой домен", "")["пометка"]
+
+
 # ── Agent-loop ───────────────────────────────────────────────────────────────
 
 
