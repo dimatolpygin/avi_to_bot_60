@@ -644,3 +644,46 @@ async def test_obyavlenie_zapominaetsya_pered_obrabotkoy():
 
     assert ya.obyavleniya == [("sbsauna", "c1", v.obyavlenie)]
     assert ya.obrabotano == [("sbsauna", "c1", "сколько стоит")]
+
+
+_VAKANSIYA = {"title": "Начинающий авитолог",
+              "url": "https://avito.ru/krasnodar/vakansii/nachinayuschiy_avitolog_8343316204"}
+
+
+async def test_vakansiya_ignoriruetsya_polnostyu():
+    # Чат под объявлением-вакансией (наём) — соискатель, не клиент: бот не отвечает
+    # И не зеркалит в amoCRM (гейт выше зеркала). Запрос заказчика 21.08.
+    ya, api, zer = _FakeYadro(), _FakeAPI(), _FakeZerkalo()
+    obr = sdelat_obrabotchik("saunamart", api, ya, None, zerkalo=zer)
+
+    await obr(izvlech_vhodyashchee(
+        _chat_vhod(chat_id="c1", text="здравствуйте, по вакансии", item=_VAKANSIYA)))
+
+    assert ya.obrabotano == []        # ядро не зван
+    assert api.otpravleno == []       # клиенту ничего не ушло
+    assert zer.vhod == []             # и в amoCRM НЕ зеркалили (соискатель ≠ лид)
+
+
+async def test_vakansiya_foto_tozhe_ignoriruetsya():
+    # Вложение под вакансией тоже не рождает дежурную просьбу «опишите словами».
+    ya, api = _FakeYadro(), _FakeAPI()
+    obr = sdelat_obrabotchik("saunamart", api, ya, None)
+    chat = {"id": "c1", "context": {"type": "item", "value": _VAKANSIYA},
+            "last_message": {"id": "m1", "direction": "in", "content": {}}}
+
+    await obr(izvlech_vhodyashchee(chat))
+
+    assert api.otpravleno == []       # ни ответа, ни просьбы текстом
+    assert ya.obrabotano == []
+
+
+async def test_obychnoe_obyavlenie_ne_prinimaetsya_za_vakansiyu():
+    # Товарное объявление (в url есть remont_i_stroitelstvo) обрабатывается как обычно.
+    ya, api = _FakeYadro(), _FakeAPI()
+    obr = sdelat_obrabotchik("saunamart", api, ya, None)
+    item = {"title": "Вагонка термоосина",
+            "url": "https://avito.ru/krasnodar/remont_i_stroitelstvo/vagonka_termoosina_3480593154"}
+
+    await obr(izvlech_vhodyashchee(_chat_vhod(chat_id="c1", text="есть в наличии?", item=item)))
+
+    assert ya.obrabotano == [("saunamart", "c1", "есть в наличии?")]

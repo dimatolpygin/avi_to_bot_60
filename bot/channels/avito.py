@@ -254,6 +254,16 @@ def _obyavlenie_chata(chat: dict) -> dict | None:
     return kontekst.get("value") if kontekst.get("type") == "item" else None
 
 
+def _obyavlenie_vakansiya(ob: dict | None) -> bool:
+    """Чат под объявлением-ВАКАНСИЕЙ (наём): в url объявления есть сегмент
+    `/vakansii/`. Такой чат — соискатель, а не клиент: бот не реагирует вовсе
+    (ни ответа, ни зеркала в amoCRM). Отдельного поля категории Авито в
+    `context.value` не отдаёт, поэтому признак берём из url объявления."""
+    if not ob:
+        return False
+    return "/vakansii/" in (ob.get("url") or "").lower()
+
+
 def _vhodyashchee_iz_soobshcheniya(chat_id: str, msg: dict,
                                    obyavlenie: dict | None) -> Vhodyashchee | None:
     """Разобрать ОДНО сообщение (из `last_message` или списка сообщений) во
@@ -606,6 +616,14 @@ def sdelat_obrabotchik(kod: str, api: AvitoAPI, yadro,
         if belyy_spisok is not None and v.chat_id not in belyy_spisok:
             logger.info("🔇 Авито «%s»: чат %s не в белом списке — пропускаю",
                         kod, v.chat_id)
+            return
+        # Объявление-вакансия (наём): чат — соискатель, а не клиент. Игнорим
+        # целиком — ни ответа, ни зеркала в amoCRM (запрос заказчика 21.08). Гейт
+        # ВЫШЕ зеркала и перехвата оператором: такой чат вообще не должен попадать
+        # в воронку продаж. Признак — сегмент `/vakansii/` в url объявления чата.
+        if _obyavlenie_vakansiya(v.obyavlenie):
+            logger.info("💼 Авито «%s»: чат %s под объявлением-вакансией «%s» — игнорю",
+                        kod, v.chat_id, (v.obyavlenie or {}).get("title"))
             return
         imya = f"avito:{v.author_id}" if v.author_id else f"avito:{v.chat_id}"
         # Окно сообщений тянем один раз: и на зеркалирование ручных ответов
