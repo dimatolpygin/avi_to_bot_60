@@ -547,8 +547,23 @@ PUSTO_POD_OBYAVLENIEM = (
     "сверх объявления не выдумывай — если их нет, предложи уточнить.")
 
 
+# Напоминание в НЕпустой выдаче под объявлением: найденные позиции — это каталог,
+# а НЕ товар объявления. Клиент под объявлением видит СВОЮ цену, и та же по названию
+# позиция каталога с другой ценой её не отменяет. Без этого модель верит конкретным
+# цифрам из поиска и оспаривает объявление («242 ₽ — за прошлый период»), подставляя
+# каталожные 385/414 (живой баг 21.08, гималайская соль).
+def _napominanie_ob_obyavlenii(metka: str) -> str:
+    return (
+        f"Клиент пишет под объявлением {metka}. Позиции в «найдено» — это КАТАЛОГ, "
+        f"а НЕ товар объявления: если по названию совпадает, но цена другая — это "
+        f"другой формат/SKU. Если вопрос про товар объявления, его цену и формат бери "
+        f"ИЗ ОБЪЯВЛЕНИЯ (в системном факте), каталожную позицию с другой ценой за него "
+        f"не выдавай и цену объявления не оспаривай. Каталог предлагай, только если "
+        f"клиент явно спросил про другой товар.")
+
+
 def payload_poiska(nahodki: list[Nahodka], kanal: str, data_praysa: str,
-                   pod_obyavleniem: bool = False) -> dict:
+                   pod_obyavleniem: bool = False, obyavlenie_kratko: str = "") -> dict:
     payload: dict = {"дата_актуальности_прайса": data_praysa, "канал_поиска": kanal}
     if not nahodki:
         payload["найдено"] = []
@@ -559,6 +574,8 @@ def payload_poiska(nahodki: list[Nahodka], kanal: str, data_praysa: str,
                 kanal, PUSTO_PO_KANALU["не найдено"])
         return payload
     payload["найдено"] = [_pozitsiya_v_payload(n) for n in nahodki]
+    if obyavlenie_kratko:
+        payload["объявление"] = _napominanie_ob_obyavlenii(obyavlenie_kratko)
     return payload
 
 
@@ -579,7 +596,8 @@ async def otvetit(cfg: OpenRouterConfig, poisk: Poisk | None, istoriya: list[dic
                   tekst_klienta: str, data_praysa: str = "",
                   sistemny: str | None = None,
                   peredat_lead=None, peredat_dialog=None,
-                  pod_obyavleniem: bool = False) -> OtvetAgenta:
+                  pod_obyavleniem: bool = False,
+                  obyavlenie_kratko: str = "") -> OtvetAgenta:
     """Ответ на реплику клиента.
 
     `istoriya` — предыдущие реплики диалога (`role`/`content`); хранит её
@@ -599,7 +617,9 @@ async def otvetit(cfg: OpenRouterConfig, poisk: Poisk | None, istoriya: list[dic
     `pod_obyavleniem` (Авито) — клиент пишет под активным объявлением. Меняет
     пометку пустой выдачи «не найдено»: под объявлением товар в продаже, поэтому
     «уточню у поставщика»/«нет в прайсе» не говорим (см. `PUSTO_POD_OBYAVLENIEM`).
-    «Чужой домен» это не смягчает.
+    «Чужой домен» это не смягчает. `obyavlenie_kratko` (««заголовок» за цена») —
+    та же метка в НЕпустую выдачу: каталог ≠ товар объявления, его цену каталогом
+    не перебиваем (см. `_napominanie_ob_obyavlenii`).
     """
     if sistemny is None:
         if poisk is None:
@@ -683,7 +703,8 @@ async def otvetit(cfg: OpenRouterConfig, poisk: Poisk | None, istoriya: list[dic
                 soobshcheniya.append({
                     "role": "tool", "tool_call_id": vyzov["id"],
                     "content": json.dumps(
-                        payload_poiska(nahodki, kanal, data_praysa, pod_obyavleniem),
+                        payload_poiska(nahodki, kanal, data_praysa, pod_obyavleniem,
+                                       obyavlenie_kratko),
                         ensure_ascii=False),
                 })
             continue

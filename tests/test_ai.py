@@ -312,6 +312,20 @@ def test_chuzhoy_domen_pod_obyavleniem_ne_smyagchaetsya(poisk):
     assert pod["пометка"] == agent.payload_poiska([], "чужой домен", "")["пометка"]
 
 
+def test_nepustaya_vydacha_pod_obyavleniem_neset_napominanie(poisk):
+    """Непустая выдача под объявлением несёт напоминание «каталог ≠ товар
+    объявления»: цену объявления каталогом не перебиваем (живой баг 21.08 —
+    под «Гималайская соль 242 ₽» бот тянул из каталога 385/414)."""
+    nahodki, kanal = poisk.iskat("вагонка липа сорт а")
+    assert nahodki, "ожидали непустую выдачу для проверки напоминания"
+    p = agent.payload_poiska(nahodki, kanal, "", True, "«Гималайская соль» за 242 ₽")
+    assert "объявление" in p
+    assert "«Гималайская соль» за 242 ₽" in p["объявление"]
+    assert "цену объявления не оспаривай" in p["объявление"]
+    # Без метки поля «объявление» в выдаче нет.
+    assert "объявление" not in agent.payload_poiska(nahodki, kanal, "")
+
+
 # ── Agent-loop ───────────────────────────────────────────────────────────────
 
 
