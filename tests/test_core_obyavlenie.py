@@ -69,8 +69,31 @@ def test_fakt_cena_obyavleniya_avtoritetna():
     assert "не бери из каталога" in f
 
 
+def test_fakt_neset_opisanie_iz_fida():
+    """Когда объявление есть в индексе фида — его описание уходит в факт как источник
+    правды (мессенджер описание не отдаёт; ответ про размер/объём — только отсюда)."""
+    f = _fakt_obyavleniya(
+        {"title": "Гималайская соль в ассортименте", "price_string": "242 ₽"},
+        opisanie="Размеры: 20×10×2,5/5 см, 20×20×3,5 см. Прямые поставки.",
+    )
+    assert "ОПИСАНИЕ ЭТОГО ОБЪЯВЛЕНИЯ" in f
+    assert "источник правды" in f and "бери ОТСЮДА" in f
+    assert "20×10×2,5/5 см" in f            # реальные размеры долетели до промпта
+    # Чего и в описании нет — уточнить, а не брать из каталога.
+    assert "не выдумывай" in f
+
+
+def test_fakt_bez_opisaniya_ne_dobavlyaet_blok():
+    """Нет описания в индексе (обычный случай) → блок описания не добавляется,
+    поведение прежнее (бот уточняет формат на вопрос о детали)."""
+    f = _fakt_obyavleniya({"title": "Окно для бани", "price_string": "1 900 ₽"})
+    assert "ОПИСАНИЕ ЭТОГО ОБЪЯВЛЕНИЯ" not in f
+
+
 def test_fakt_bez_zagolovka_pust():
     assert _fakt_obyavleniya({"price_string": "от 1 ₽"}) == ""
+    # Даже с описанием: нет заголовка — нет факта (объявление не идентифицировано).
+    assert _fakt_obyavleniya({"price_string": "от 1 ₽"}, opisanie="что-то") == ""
 
 
 def test_sistemny_podmeshivaet_obyavlenie_po_klyuchu():

@@ -23,6 +23,7 @@ from .ai.agent import otvetit, sobrat_prompt
 from .chelovek.dispetcher import Dispetcher, Kanal, Pamyat
 from .chelovek.razbivka import Tempo
 from .config import Config
+from .etl.opisaniya_feed import zagruzit_indeks as zagruzit_opisaniya
 from .lead import DannyeLida, sohranit_lead
 from .logger import logger
 from .pamyat import PamyatRedis
@@ -69,6 +70,11 @@ class Yadro:
         # каталожными ценами, что позиции каталога ≠ товар объявления и его цену
         # каталогом не перебиваем (иначе модель верит конкретным цифрам поиска).
         self._obyavleniya_metka: dict[str, str] = {}
+        # Описания объявлений из фида автозагрузки (этап 14, «подтянуть описание»):
+        # item_id → санированный текст описания. API Авито описание не отдаёт —
+        # источник только фид (`data/opisaniya*.json`, `bot/etl/opisaniya_feed`).
+        # Грузится один раз при старте; нет файлов → пусто, фича не «загорается».
+        self._opisaniya_feed: dict[str, str] = {}
         # Рубильник ответов per-account (запрос заказчика 19.08): выключенный
         # аккаунт по-прежнему зеркалит входящие в amoCRM и журнал, но САМ НЕ
         # отвечает. Нет записи = отвечает (дефолт True). Значения ставит синк
@@ -86,6 +92,8 @@ class Yadro:
         назвать ни одной цены, а это худший из отказов.
         """
         self._fabrika_sessiy = fabrika_sessiy
+        # Индекс описаний объявлений (Авито) — общий на все аккаунты (item_id уникален).
+        self._opisaniya_feed = zagruzit_opisaniya()
         for kod in kody:
             prof = profil(kod)
             if not prof.tovarnyy:
@@ -342,7 +350,9 @@ class Yadro:
         подмешивать нельзя. Telegram эту функцию не зовёт вовсе.
         """
         klyuch = Dispetcher.klyuch(kod, chat)
-        fakt = _fakt_obyavleniya(obyavlenie) if obyavlenie else ""
+        # Описание того же объявления из фида (если есть) — точные размеры/материал.
+        opisanie = self._opisaniya_feed.get(str((obyavlenie or {}).get("id") or ""), "")
+        fakt = _fakt_obyavleniya(obyavlenie, opisanie) if obyavlenie else ""
         if fakt:
             self._obyavleniya[klyuch] = fakt
             self._obyavleniya_metka[klyuch] = _metka_obyavleniya(obyavlenie)
@@ -473,8 +483,13 @@ def _metka_obyavleniya(o: dict) -> str:
     return f"«{title}» за {price}" if price else f"«{title}»"
 
 
-def _fakt_obyavleniya(o: dict) -> str:
+def _fakt_obyavleniya(o: dict, opisanie: str = "") -> str:
     """Короткий факт для промпта из объявления Авито (`context.value`).
+
+    `opisanie` — санированный текст описания из фида автозагрузки (если объявление
+    в индексе). Мессенджер описания не даёт, поэтому по умолчанию его нет и бот на
+    вопрос о размере/составе уточняет формат; когда описание есть — оно уходит в
+    промпт как источник правды по товару (размеры/материал берём оттуда, не из каталога).
 
     Не пересказ прайса, а подсказка «клиент смотрит вот это». Ключевой смысл: у
     аккаунта объявлений больше, чем позиций в прайс-каталоге (напр. у Saunamart
@@ -491,6 +506,12 @@ def _fakt_obyavleniya(o: dict) -> str:
         return ""
     price = (o.get("price_string") or "").strip()
     hvost = f", цена {price}" if price else ""
+    opis_blok = (
+        f" ОПИСАНИЕ ЭТОГО ОБЪЯВЛЕНИЯ (полный текст — источник правды по товару, отвечай по "
+        f"нему; размеры, материал, состав, характеристики бери ОТСЮДА, а не из каталога): "
+        f"«{opisanie.strip()}». Если в описании ответа на вопрос нет — тогда уточни у клиента "
+        f"или предложи выбрать, но не выдумывай и не бери из каталога."
+    ) if opisanie and opisanie.strip() else ""
     return (
         f"ГЛАВНЫЙ КОНТЕКСТ (АВИТО): клиент пишет ИЗ объявления «{title}»{hvost} и СЕЙЧАС "
         f"смотрит именно этот товар. Считай его вопрос вопросом ПРО ЭТОТ товар, если он "
@@ -513,6 +534,7 @@ def _fakt_obyavleniya(o: dict) -> str:
         f"каталога: скажи, что уточнишь точный формат, или спроси, какой вариант нужен, и "
         f"помоги выбрать. Оговорки: объёмы по объявлению не считай; гейт «не наш профиль» "
         f"остаётся выше (постороннее, не про это объявление и не банное — отвечай как обычно)."
+        + opis_blok
     )
 
 
