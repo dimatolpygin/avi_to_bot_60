@@ -499,7 +499,7 @@ async def test_lead_uhodit_s_vyzhimkoy(poisk, cfg, monkeypatch):
     monkeypatch.setattr(agent, "chat", fake)
     peredannye = []
 
-    async def peredat(telefon, imya, vyzhimka):
+    async def peredat(telefon, imya, vyzhimka, tema=None):
         peredannye.append((telefon, imya, vyzhimka))
 
     r = await agent.otvetit(cfg, poisk, [], "мой номер 8 900 123-45-67",
@@ -520,11 +520,31 @@ async def test_lead_bez_telefona_ne_peredaetsya(poisk, cfg, monkeypatch):
     monkeypatch.setattr(agent, "chat", fake)
     peredannye = []
 
-    async def peredat(telefon, imya, vyzhimka):
+    async def peredat(telefon, imya, vyzhimka, tema=None):
         peredannye.append(telefon)
 
     r = await agent.otvetit(cfg, poisk, [], "перезвоните мне", peredat_lead=peredat)
     assert peredannye == []
+    assert r.lead_peredan is False
+
+
+@pytest.mark.asyncio
+async def test_lead_zaglushka_bez_cifr_ne_uhodit(poisk, cfg, monkeypatch):
+    """Живой баг 23.08: клиент номер не давал, а модель вызвала save_lead с текстом
+    «нужен номер клиента» — и он попал в поле «Телефон» контакта amoCRM. «Номер»
+    без цифр — не телефон: лид не передаём, в CRM мусор не пишем."""
+    fake = FakeChat([
+        _vyzov_lida("нужен номер клиента"),
+        {"content": "Подскажите ваш номер, чтобы менеджер связался.", "tool_calls": None},
+    ])
+    monkeypatch.setattr(agent, "chat", fake)
+    peredannye = []
+
+    async def peredat(telefon, imya, vyzhimka, tema=None):
+        peredannye.append(telefon)
+
+    r = await agent.otvetit(cfg, poisk, [], "передайте менеджеру", peredat_lead=peredat)
+    assert peredannye == []                 # мусорный «номер» в CRM не ушёл
     assert r.lead_peredan is False
 
 
@@ -538,7 +558,7 @@ async def test_padenie_bd_ne_royaet_dialog(poisk, cfg, monkeypatch):
     ])
     monkeypatch.setattr(agent, "chat", fake)
 
-    async def padaet(telefon, imya, vyzhimka):
+    async def padaet(telefon, imya, vyzhimka, tema=None):
         raise RuntimeError("Postgres лёг")
 
     r = await agent.otvetit(cfg, poisk, [], "мой номер 89001234567", peredat_lead=padaet)
@@ -570,7 +590,7 @@ async def test_peredat_menedzheru_zovyot_kolbek_bez_telefona(cfg, monkeypatch):
     monkeypatch.setattr(agent, "chat", fake)
     peredannye = []
 
-    async def peredat(prichina, vyzhimka):
+    async def peredat(prichina, vyzhimka, tema=None):
         peredannye.append((prichina, vyzhimka))
 
     r = await agent.otvetit(cfg, None, [], "давайте созвонимся", sistemny="тест",
@@ -591,7 +611,7 @@ async def test_peredat_menedzheru_povtor_za_hod_ne_dublruet(cfg, monkeypatch):
     monkeypatch.setattr(agent, "chat", fake)
     razy = []
 
-    async def peredat(prichina, vyzhimka):
+    async def peredat(prichina, vyzhimka, tema=None):
         razy.append(1)
 
     await agent.otvetit(cfg, None, [], "готов брать", sistemny="тест",
@@ -608,7 +628,7 @@ async def test_peredat_menedzheru_sboy_ne_royaet_dialog(cfg, monkeypatch):
     ])
     monkeypatch.setattr(agent, "chat", fake)
 
-    async def padaet(prichina, vyzhimka):
+    async def padaet(prichina, vyzhimka, tema=None):
         raise RuntimeError("amoCRM лёг")
 
     r = await agent.otvetit(cfg, None, [], "готов к замеру", sistemny="тест",
@@ -630,7 +650,7 @@ async def test_peredat_menedzheru_est_u_tovarnogo_akkaunta(poisk, cfg, monkeypat
     monkeypatch.setattr(agent, "chat", fake)
     razy = []
 
-    async def peredat(prichina, vyzhimka):
+    async def peredat(prichina, vyzhimka, tema=None):
         razy.append(1)
 
     await agent.otvetit(cfg, poisk, [], "беру", peredat_dialog=peredat)
@@ -727,7 +747,7 @@ async def test_posle_lida_pro_nomer_govorit_mozhno(poisk, cfg, monkeypatch):
     ])
     monkeypatch.setattr(agent, "chat", fake)
 
-    async def peredat(telefon, imya, vyzhimka):
+    async def peredat(telefon, imya, vyzhimka, tema=None):
         return None
 
     r = await agent.otvetit(cfg, poisk, [], "мой номер 89001234567", peredat_lead=peredat)

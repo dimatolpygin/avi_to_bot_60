@@ -25,7 +25,7 @@ from sqlalchemy import select
 from ..cache import PREFIKS
 from ..config import AmoRestConfig
 from ..logger import log_oshibka, logger
-from ..models import Account, Lead
+from ..models import Account, Dialog, Lead
 from ..profili import istochnik_akkaunta
 
 TAYMAUT_S = 30.0
@@ -180,11 +180,22 @@ class AmoAPI:
                 continue
             info = {"lead_id": lid, "status_id": lead.get("status_id"),
                     "responsible_id": lead.get("responsible_user_id") or 0,
-                    "imya": imya}
+                    "imya": imya, "contact_id": contact_id}
             if lead.get("status_id") == STATUS_NERAZOBRANNOE:
                 return info                    # идеальная цель — её и двигаем
             kandidat = kandidat or info        # уже в работе — запасной вариант
         return kandidat
+
+    async def dobavit_telefon_kontaktu(self, contact_id: int, telefon: str) -> None:
+        """Дописать телефон существующему контакту (PATCH).
+
+        Нужно, когда двигаем сделку чата из «Неразобранного» вместо создания
+        дубля (баг заказчика 23.08): контакт этого чата уже есть — его завёл
+        amojo на первое входящее, — а номера у него нет, клиент дал его только
+        сейчас. Пишем в стандартное поле PHONE (первый номер контакта)."""
+        await self._patch(f"/api/v4/contacts/{contact_id}", {
+            "custom_fields_values": [
+                {"field_code": "PHONE", "values": [{"value": telefon}]}]})
 
     async def dvinut_sdelku(self, lead_id: int, *, status_id: int | None = None,
                             responsible_id: int | None = None,
@@ -233,34 +244,98 @@ async def vybrat_menedzhera(redis, kod: str) -> int:
 _SLUZHEBNYE_IMENA = {"клиент", "клиент авито", "авито клиент"}
 
 
-def _imya_sdelki(kod: str, imya: str | None) -> str:
-    """Имя сделки с источником аккаунта (этап 18): «Авито · <источник> · <клиент>».
+def _imya_sdelki(kod: str, imya: str | None, tema: str | None = None) -> str:
+    """Имя сделки с источником аккаунта: «Авито · <источник> · <тема|клиент>».
 
     Три аккаунта Авито льются в один канал amoCRM — без метки менеджер не поймёт,
     чей лид и по какому направлению отвечать (Saunamart товары ≠ SB SAUNA услуги ≠
     Дешман бюджет). Метку берём из общей карты `profili.istochnik_akkaunta`, чтобы
-    имя сделки и бейдж панели не разъехались."""
-    kto = (imya or "").strip()
+    имя сделки и бейдж панели не разъехались.
+
+    Хвост имени (запрос заказчика 23.08 — «Авито · Saunamart · Заказ вагонка»):
+    короткая ТЕМА разговора, которую даёт модель, если есть; иначе имя клиента;
+    иначе «клиент». Тему подрезаем — имя сделки не должно быть простынёй."""
+    tem = (tema or "").strip()
+    kto = tem or (imya or "").strip()
     if not kto or kto.lower() in _SLUZHEBNYE_IMENA:
         kto = "клиент"
+    if len(kto) > 40:
+        kto = kto[:40].rsplit(" ", 1)[0].rstrip(" ,;.-") or kto[:40]
     return f"Авито · {istochnik_akkaunta(kod)} · {kto}"
 
 
-async def otpravit_lead(api: AmoAPI, redis, sessiya, lead: Lead, kod: str) -> bool:
-    """Создать сделку+контакт+заметку+задачу по строке `leads` и обновить строку.
+async def _nayti_sdelku_chata_lida(api: "AmoAPI", redis, sessiya, lead: Lead,
+                                   kod: str) -> dict | None:
+    """Существующая сделка чата этого лида (её завёл amojo с ПЕРЕПИСКОЙ) или None.
+
+    Клиент дал телефон в чате, который amoCRM уже завёл в «Неразобранном» на первое
+    входящее — с полной перепиской. Раньше `otpravit_lead` на это создавал ВТОРУЮ
+    карточку (пустую, без истории) — жалоба заказчика 23.08: сделка «Первичный
+    контакт» без чата, а переписка отдельно в «Неразобранном». Находим ту сделку и
+    двигаем её (как 14.11 для случая без телефона), а не плодим дубль.
+
+    Цепочка: chat_key лида → conv-UUID из Redis (его положило зеркало) →
+    `nayti_sdelku_po_chatu`. Нет Redis/маппинга/диалога → None (звонящий создаст
+    новую сделку — мягкий фолбэк, клиента не теряем)."""
+    if redis is None or lead.dialog_id is None:
+        return None
+    chat_key = (await sessiya.execute(
+        select(Dialog.chat_key).where(Dialog.id == lead.dialog_id))).scalar_one_or_none()
+    if not chat_key:
+        return None
+    from .amojo import Zerkalo
+    try:
+        conv_uuid = await redis.get(Zerkalo.klyuch_conv(kod, chat_key))
+    except Exception as e:  # noqa: BLE001 — кеш не роняет отправку лида
+        log_oshibka(f"amoCRM: не прочитал conv-UUID лида #{lead.id}: {e}")
+        return None
+    if not conv_uuid:
+        return None
+    if isinstance(conv_uuid, bytes):
+        conv_uuid = conv_uuid.decode()
+    return await api.nayti_sdelku_po_chatu(conv_uuid)
+
+
+async def otpravit_lead(api: AmoAPI, redis, sessiya, lead: Lead, kod: str,
+                        *, tema: str | None = None) -> bool:
+    """Отправить лид в amoCRM и обновить строку `leads`.
+
+    Клиент дал телефон. Если у чата УЖЕ есть сделка (её завёл amojo с перепиской) —
+    двигаем её и дописываем телефон на существующий контакт, а НЕ создаём дубль без
+    истории (баг заказчика 23.08). Не нашли — создаём сделку+контакт как раньше.
+    Затем в обоих случаях — заметка (саммари) + задача менеджеру.
 
     Возвращает True при успехе. Любой сбой → `status=failed` + текст ошибки
     (для повтора), исключение не пробрасывается: отправка лида не роняет процесс.
     """
     try:
         responsible = await vybrat_menedzhera(redis, kod)
-        status_id = STATUS_PERVICHNY if lead.phone else STATUS_NERAZOBRANNOE
-        sozd = await api.sozdat_sdelku(
-            imya_sdelki=_imya_sdelki(kod, lead.name), imya_kontakta=lead.name,
-            telefon=lead.phone, status_id=status_id, responsible_id=responsible)
-        lead_id = sozd["lead_id"]
-        if not lead_id:
-            raise OshibkaAmo("amoCRM не вернул id сделки")
+        imya_sdelki = _imya_sdelki(kod, lead.name, tema)
+        target = await _nayti_sdelku_chata_lida(api, redis, sessiya, lead, kod)
+        if target:
+            lead_id = target["lead_id"]
+            contact_id = target.get("contact_id")
+            if target["status_id"] == STATUS_NERAZOBRANNOE:
+                await api.dvinut_sdelku(lead_id, status_id=STATUS_PERVICHNY,
+                                        responsible_id=responsible, imya_sdelki=imya_sdelki)
+            else:
+                # Уже в работе — назад не двигаем; уважим текущего ответственного
+                # (ему и задача) и лишь дадим сделке осмысленное имя.
+                responsible = target["responsible_id"] or responsible
+                await api.dvinut_sdelku(lead_id, imya_sdelki=imya_sdelki)
+            if lead.phone and contact_id:
+                await api.dobavit_telefon_kontaktu(contact_id, lead.phone)
+            logger.info("📇 amoCRM: лид #%s → существующая сделка %s чата (аккаунт %s), "
+                        "дубль не создан", lead.id, lead_id, kod)
+        else:
+            status_id = STATUS_PERVICHNY if lead.phone else STATUS_NERAZOBRANNOE
+            sozd = await api.sozdat_sdelku(
+                imya_sdelki=imya_sdelki, imya_kontakta=lead.name,
+                telefon=lead.phone, status_id=status_id, responsible_id=responsible)
+            lead_id = sozd["lead_id"]
+            if not lead_id:
+                raise OshibkaAmo("amoCRM не вернул id сделки")
+            contact_id = sozd.get("contact_id")
         if lead.note:
             await api.dobavit_primechanie(lead_id, lead.note)
         zadacha = "Связаться с клиентом с Авито"
@@ -269,7 +344,7 @@ async def otpravit_lead(api: AmoAPI, redis, sessiya, lead: Lead, kod: str) -> bo
         await api.sozdat_zadachu(lead_id, responsible, zadacha)
 
         lead.amo_lead_id = lead_id
-        lead.amo_contact_id = sozd.get("contact_id")
+        lead.amo_contact_id = contact_id
         lead.amo_responsible_id = responsible
         lead.status = "sent"
         lead.error = None
@@ -291,11 +366,12 @@ async def otpravit_lead(api: AmoAPI, redis, sessiya, lead: Lead, kod: str) -> bo
 
 
 async def otpravit_lead_po_id(cfg: AmoRestConfig, redis, fabrika_sessiy,
-                              lead_id: int) -> bool:
+                              lead_id: int, *, tema: str | None = None) -> bool:
     """Загрузить строку лида по id и отправить в amoCRM. Точка входа из ядра.
 
-    Токен/фабрика/лид отсутствуют → тихо выходим (лид остаётся в БД со `new`,
-    подхватит `otpravit_nedoslannye`)."""
+    `tema` — короткая тема разговора от модели (в имя сделки, Task C). Токен/фабрика/
+    лид отсутствуют → тихо выходим (лид остаётся в БД со `new`, подхватит
+    `otpravit_nedoslannye`)."""
     if cfg is None or not cfg.zapolnen or fabrika_sessiy is None:
         return False
     try:
@@ -311,14 +387,15 @@ async def otpravit_lead_po_id(cfg: AmoRestConfig, redis, fabrika_sessiy,
                 log_oshibka(f"amoCRM: у лида #{lead_id} нет аккаунта")
                 return False
             async with AmoAPI(cfg) as api:
-                return await otpravit_lead(api, redis, sessiya, lead, kod)
+                return await otpravit_lead(api, redis, sessiya, lead, kod, tema=tema)
     except Exception as e:  # noqa: BLE001
         log_oshibka(f"amoCRM: отправка лида #{lead_id} упала: {e}")
         return False
 
 
 async def peredat_dialog_menedzheru(cfg: AmoRestConfig, redis, *, kod: str,
-                                    conv_uuid: str | None, vyzhimka: str) -> bool:
+                                    conv_uuid: str | None, vyzhimka: str,
+                                    tema: str | None = None) -> bool:
     """Передать ГОРЯЧИЙ диалог менеджеру без телефона (14.11): двигаем сделку
     из «Неразобранного» на «Первичный контакт», назначаем ответственного 50/50
     и ставим задачу. Точка входа из ядра.
@@ -346,7 +423,7 @@ async def peredat_dialog_menedzheru(cfg: AmoRestConfig, redis, *, kod: str,
                     # «Сделка #id» — по ней не видно, что клиент с Авито.
                     await api.dvinut_sdelku(lead_id, status_id=STATUS_PERVICHNY,
                                             responsible_id=responsible,
-                                            imya_sdelki=_imya_sdelki(kod, target.get("imya")))
+                                            imya_sdelki=_imya_sdelki(kod, target.get("imya"), tema))
                     logger.info("📇 amoCRM: сделка %s (аккаунт %s) из «Неразобранного» → "
                                 "«Первичный контакт», ответственный %s", lead_id, kod, responsible)
                 elif not target["responsible_id"]:
@@ -359,7 +436,7 @@ async def peredat_dialog_menedzheru(cfg: AmoRestConfig, redis, *, kod: str,
                                 "добавляю задачу", lead_id, kod, responsible)
             else:
                 sozd = await api.sozdat_sdelku(
-                    imya_sdelki=_imya_sdelki(kod, None), imya_kontakta=None,
+                    imya_sdelki=_imya_sdelki(kod, None, tema), imya_kontakta=None,
                     telefon=None, status_id=STATUS_PERVICHNY, responsible_id=responsible)
                 lead_id = sozd["lead_id"]
                 if not lead_id:

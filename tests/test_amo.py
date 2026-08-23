@@ -49,6 +49,22 @@ def test_imya_sdelki_neizvestny_kod_ne_ronyaet():
     assert _imya_sdelki("новый_акк", "Иван") == "Авито · новый_акк · Иван"
 
 
+def test_imya_sdelki_beret_temu_glavnee_imeni():
+    """Тема разговора (Task C, запрос заказчика 23.08) идёт в хвост имени сделки
+    и главнее имени клиента; пустая тема → имя клиента; ни того, ни другого → «клиент»."""
+    assert _imya_sdelki("saunamart", None, "Заказ вагонка") == "Авито · Saunamart · Заказ вагонка"
+    assert _imya_sdelki("saunamart", "Иван", "Печь для парной") == "Авито · Saunamart · Печь для парной"
+    assert _imya_sdelki("saunamart", "Иван", "  ") == "Авито · Saunamart · Иван"
+    assert _imya_sdelki("saunamart", None, None) == "Авито · Saunamart · клиент"
+
+
+def test_imya_sdelki_dlinnuyu_temu_podrezaet():
+    dlinnaya = "Заказ вагонки липа экстра на стены и полок для большой парной с доставкой"
+    imya = _imya_sdelki("saunamart", None, dlinnaya)
+    assert imya.startswith("Авито · Saunamart · Заказ вагонки липа")
+    assert len(imya) < len(f"Авито · Saunamart · {dlinnaya}")
+
+
 def _api(handler) -> AmoAPI:
     client = httpx.AsyncClient(base_url=CFG.base_url, transport=httpx.MockTransport(handler),
                                headers={"Authorization": f"Bearer {CFG.access_token}"})
@@ -126,12 +142,16 @@ async def test_oshibka_4xx():
 # ── Раздача 50/50 ────────────────────────────────────────────────────────────
 
 class _FakeRedis:
-    def __init__(self):
+    def __init__(self, conv=None):
         self._c = {}
+        self._conv = conv          # что вернёт get (conv-UUID чата), None по умолчанию
 
     async def incr(self, key):
         self._c[key] = self._c.get(key, 0) + 1
         return self._c[key]
+
+    async def get(self, _key):
+        return self._conv
 
 
 async def test_round_robin_cheredovanie():
@@ -155,11 +175,13 @@ async def test_round_robin_redis_upal_pervyy():
 
 class _Lead:
     """Заглушка строки leads (не тянем ORM/БД)."""
-    def __init__(self, phone="+79990001122", name="Иван", note="о чём говорили"):
+    def __init__(self, phone="+79990001122", name="Иван", note="о чём говорили",
+                 dialog_id=None):
         self.id = 1
         self.phone = phone
         self.name = name
         self.note = note
+        self.dialog_id = dialog_id
         self.status = "new"
         self.amo_lead_id = None
         self.amo_contact_id = None
@@ -174,6 +196,24 @@ class _Sessiya:
 
     async def commit(self):
         self.commits += 1
+
+
+class _Rezultat:
+    def __init__(self, v):
+        self._v = v
+
+    def scalar_one_or_none(self):
+        return self._v
+
+
+class _SessiyaSChatom(_Sessiya):
+    """Сессия, отдающая chat_key диалога (для дедупа: лид → чат → сделка)."""
+    def __init__(self, chat_key="avito-chat-1"):
+        super().__init__()
+        self._chat_key = chat_key
+
+    async def execute(self, *_a, **_k):
+        return _Rezultat(self._chat_key)
 
 
 async def test_otpravit_lead_uspeh_stavit_sent_i_id():
@@ -191,6 +231,68 @@ async def test_otpravit_lead_uspeh_stavit_sent_i_id():
     assert lead.amo_lead_id == 900 and lead.amo_contact_id == 901
     assert lead.amo_responsible_id in (6783360, 1356618)
     assert lead.sent_at is not None
+
+
+async def test_otpravit_lead_dvigaet_sdelku_chata_bez_dublya():
+    """Баг заказчика 23.08: клиент дал телефон — раньше создавалась ВТОРАЯ пустая
+    карточка, а переписка оставалась в «Неразобранном». Теперь находим сделку чата
+    (по conv-UUID из Redis) и ДВИГАЕМ её + дописываем телефон на её контакт, а
+    дубль (`/leads/complex`) не создаём. Тема уходит в имя (Task C)."""
+    calls = {"complex": 0, "lead_patch": None, "contact_patch": None}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        p = request.url.path
+        if p == "/api/v4/leads/complex":
+            calls["complex"] += 1
+            return httpx.Response(200, json=[{"id": 999, "contact_id": 888}])
+        if request.method == "PATCH" and p == "/api/v4/leads/20":
+            calls["lead_patch"] = json.loads(request.content)
+            return httpx.Response(200, json={"id": 20})
+        if request.method == "PATCH" and p == "/api/v4/contacts/55":
+            calls["contact_patch"] = json.loads(request.content)
+            return httpx.Response(200, json={"id": 55})
+        if p == "/api/v4/contacts/chats":
+            return httpx.Response(200, json={"_embedded": {
+                "chats": [{"chat_id": "u", "contact_id": 55}]}})
+        if p == "/api/v4/contacts/55":
+            return httpx.Response(200, json={"name": "Иван",
+                                             "_embedded": {"leads": [{"id": 20}]}})
+        if request.method == "GET" and p == "/api/v4/leads/20":
+            return httpx.Response(200, json={"id": 20, "pipeline_id": VORONKA_SAUNA,
+                                             "status_id": STATUS_NERAZOBRANNOE})
+        return httpx.Response(200, json=[{"id": 1}])           # notes / tasks
+
+    lead = _Lead(dialog_id=7)
+    sess = _SessiyaSChatom("avito-chat-1")
+    async with _api(handler) as api:
+        ok = await otpravit_lead(api, _FakeRedis(conv="u"), sess, lead, "saunamart",
+                                 tema="Заказ вагонка")
+
+    assert ok is True
+    assert calls["complex"] == 0                               # дубль НЕ создан
+    assert calls["lead_patch"]["status_id"] == STATUS_PERVICHNY   # двинули из Неразобранного
+    assert calls["lead_patch"]["name"] == "Авито · Saunamart · Заказ вагонка"
+    assert calls["contact_patch"]["custom_fields_values"][0]["field_code"] == "PHONE"
+    assert calls["contact_patch"]["custom_fields_values"][0]["values"][0]["value"] == lead.phone
+    assert lead.amo_lead_id == 20 and lead.amo_contact_id == 55 and lead.status == "sent"
+
+
+async def test_otpravit_lead_bez_mappinga_sozdaet_kak_ranshe():
+    """Нет conv-UUID в Redis (маппинга нет) → фолбэк: создаём сделку как прежде."""
+    zahvat = {"complex": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/v4/leads/complex":
+            zahvat["complex"] += 1
+            return httpx.Response(200, json=[{"id": 900, "contact_id": 901}])
+        return httpx.Response(200, json=[{"id": 1}])
+
+    lead = _Lead(dialog_id=7)
+    async with _api(handler) as api:                           # redis.get → None
+        ok = await otpravit_lead(api, _FakeRedis(conv=None),
+                                 _SessiyaSChatom("c"), lead, "saunamart")
+    assert ok is True and zahvat["complex"] == 1
+    assert lead.amo_lead_id == 900
 
 
 async def test_otpravit_lead_bez_telefona_status_nerazobrannoe():

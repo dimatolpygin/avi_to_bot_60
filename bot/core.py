@@ -390,14 +390,16 @@ class Yadro:
         """
         _, _, chat = klyuch.partition(":")
 
-        async def peredat(telefon: str, imya: str | None, vyzhimka: str) -> None:
+        async def peredat(telefon: str, imya: str | None, vyzhimka: str,
+                          tema: str | None = None) -> None:
             lead_id = await sohranit_lead(self._fabrika_sessiy, DannyeLida(
                 kod_akkaunta=kod, chat=chat, kanal=self.kanal_transporta,
                 telefon=telefon, imya=imya, vyzhimka=vyzhimka))
             if lead_id and self.cfg.amo_rest is not None:
                 from .crm.amo import otpravit_lead_po_id
                 self._v_fone(otpravit_lead_po_id(
-                    self.cfg.amo_rest, self._redis, self._fabrika_sessiy, lead_id))
+                    self.cfg.amo_rest, self._redis, self._fabrika_sessiy, lead_id,
+                    tema=tema))
         return peredat
 
     def _peredat_dialog(self, kod: str, klyuch: str):
@@ -414,7 +416,7 @@ class Yadro:
         """
         _, _, chat = klyuch.partition(":")
 
-        async def peredat(prichina: str, vyzhimka: str) -> None:
+        async def peredat(prichina: str, vyzhimka: str, tema: str | None = None) -> None:
             if self.cfg.amo_rest is None:
                 logger.info("🤝 Передача менеджеру пропущена: amoCRM не подключён (%s)", prichina)
                 return
@@ -429,7 +431,7 @@ class Yadro:
             from .crm.amo import peredat_dialog_menedzheru
             self._v_fone(peredat_dialog_menedzheru(
                 self.cfg.amo_rest, self._redis, kod=kod,
-                conv_uuid=conv_uuid, vyzhimka=vyzhimka))
+                conv_uuid=conv_uuid, vyzhimka=vyzhimka, tema=tema))
         return peredat
 
     def _v_fone(self, coro) -> None:
