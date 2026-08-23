@@ -344,6 +344,56 @@ INSTRUMENT_PEREDACHA = {
     },
 }
 
+#: Детерминированный расчёт заказа (23.08). Когда клиент диктует заказ в несколько
+#: строк («20 шт 2,5 м, 50 шт 2,1 м, на полки 24 шт 1 м…»), модель тянула цены из
+#: памяти между ходами: подставляла цену полка в вагонку, придумывала цену для
+#: длины, которой в прайсе нет, пересчитывала по-разному каждый ход. Здесь каждую
+#: строку прайсит Python — цену берёт из каталога, умножает и суммирует сам.
+INSTRUMENT_RASCHET = {
+    "type": "function",
+    "function": {
+        "name": "calc_order",
+        "description": (
+            "Детерминированно посчитать заказ из нескольких позиций. Вызывай ВСЕГДА, "
+            "когда покупатель назвал несколько товаров/длин/количеств и ждёт сумму — "
+            "не перемножай и не складывай в уме, цифры из головы врут. Передавай КАЖДУЮ "
+            "строку заказа: товар словами (тип, сорт, порода), длину доски в метрах и "
+            "количество штук. Цены берутся ИЗ ПРАЙСА, сумма считается кодом. По длинам, "
+            "которых нет, вернётся честное «нет, ближайшие такие-то» — не выдумывай цену."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "items": {
+                    "type": "array",
+                    "description": "Строки заказа, по одной на товар+длину.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "query": {
+                                "type": "string",
+                                "description": ("Товар словами: тип, сорт, порода. "
+                                                "«вагонка липа экстра», «полок липа экстра»."),
+                            },
+                            "length_m": {
+                                "type": "number",
+                                "description": ("Длина доски в метрах: 2.5, 1.0. Для "
+                                                "немерных (дверь, печь, камни) не указывай."),
+                            },
+                            "qty": {
+                                "type": "integer",
+                                "description": "Количество штук.",
+                            },
+                        },
+                        "required": ["query", "qty"],
+                    },
+                },
+            },
+            "required": ["items"],
+        },
+    },
+}
+
 #: Значение `tool_choice` для предохранителей: заставить модель вызвать именно
 #: поиск. Просто "required" тут не годится — она вправе выбрать save_lead.
 FORSIROVAT_POISK = {"type": "function", "function": {"name": "search_products"}}
@@ -646,8 +696,9 @@ async def otvetit(cfg: OpenRouterConfig, poisk: Poisk | None, istoriya: list[dic
             raise ValueError("Без поиска системный промпт обязателен: "
                              "у аккаунта услуг его собирать не из чего")
         sistemny = sobrat_prompt(poisk.katalog)
-    # Поиск — только у товарного аккаунта; save_lead и передача менеджеру — у всех.
-    instrumenty = ([*INSTRUMENTY, INSTRUMENT_LEAD] if poisk is not None
+    # Поиск и расчёт заказа — только у товарного аккаунта (нужен каталог);
+    # save_lead и передача менеджеру — у всех.
+    instrumenty = ([*INSTRUMENTY, INSTRUMENT_RASCHET, INSTRUMENT_LEAD] if poisk is not None
                    else [INSTRUMENT_LEAD])
     instrumenty = [*instrumenty, INSTRUMENT_PEREDACHA]
     soobshcheniya: list[dict] = [
@@ -709,6 +760,19 @@ async def otvetit(cfg: OpenRouterConfig, poisk: Poisk | None, istoriya: list[dic
                         "content": json.dumps(
                             {"ошибка": "Такого инструмента нет. Ответь текстом."},
                             ensure_ascii=False),
+                    })
+                    continue
+
+                # Расчёт заказа — до общего фолбэка «имя не совпало = поиск»:
+                # иначе аргументы calc_order разобрались бы как поисковый запрос.
+                if imya_instrumenta == "calc_order":
+                    otvet_rascheta = _raschet_zakaza(vyzov, poisk)
+                    log_tool_call("calc_order",
+                                  {"строк": len(otvet_rascheta.get("позиции", []))},
+                                  f"итого {otvet_rascheta.get('итого_посчитано', 0)} ₽")
+                    soobshcheniya.append({
+                        "role": "tool", "tool_call_id": vyzov["id"],
+                        "content": json.dumps(otvet_rascheta, ensure_ascii=False),
                     })
                     continue
 
@@ -896,3 +960,117 @@ def _razobrat_vyzov(vyzov: dict) -> tuple[str, bool]:
     except (json.JSONDecodeError, KeyError, TypeError):
         logger.warning("Битые аргументы tool-call: %s", vyzov)
         return "", False
+
+
+def _blizhayshie_dliny(gruppa, dlina: Decimal, skolko: int = 2) -> list[str]:
+    """Ближайшие доступные длины с ценой — чтобы предложить замену отсутствующей."""
+    blizhnie = sorted(gruppa.dliny, key=lambda x: abs(x - dlina))[:skolko]
+    vyvod = []
+    for d in sorted(blizhnie):
+        poz = gruppa.po_dline(d)
+        cena = _rubli(poz.price_apiece) if poz and poz.price_apiece is not None else None
+        vyvod.append(f"{_chislo(d)} м" + (f" ({cena} ₽)" if cena is not None else ""))
+    return vyvod
+
+
+def _raschet_zakaza(vyzov: dict, poisk: Poisk) -> dict:
+    """Детерминированный расчёт заказа (23.08): цены ИЗ КАТАЛОГА, не от модели.
+
+    Живой баг: на заказ в 8 строк модель тянула цены из памяти между ходами —
+    подставляла цену полка в вагонку, придумывала цену для длины, которой в
+    прайсе нет (2,4 м), пересчитывала по-разному каждый ход. Здесь каждую строку
+    прайсит Python: поиск находит товар, `po_dline` берёт цену РОВНО этой длины
+    (без «ближайшего наугад» — подсунуть 2,9 вместо 3,0 значит соврать), умножение
+    и сумма — в коде. Отсутствующая длина → не цена, а честное «нет, ближайшие…».
+    """
+    try:
+        args = json.loads(vyzov["function"]["arguments"])
+    except (json.JSONDecodeError, KeyError, TypeError):
+        log_oshibka("Битые аргументы calc_order — расчёт не выполнен")
+        return {"ошибка": "Аргументы не разобраны, позови ещё раз."}
+
+    stroki = args.get("items")
+    if not isinstance(stroki, list) or not stroki:
+        return {"ошибка": "Пустой список позиций. Передай items: товар, длина, количество."}
+
+    pozitsii_out: list[dict] = []
+    itogo = 0
+    est_oshibki = False
+    for st in stroki:
+        if not isinstance(st, dict):
+            continue
+        zapros = str(st.get("query") or "").strip()
+        try:
+            kol = int(st.get("qty"))
+        except (TypeError, ValueError):
+            kol = 0
+        dlina_raw = st.get("length_m")
+        try:
+            dlina = Decimal(str(dlina_raw)) if dlina_raw is not None else None
+        except (ArithmeticError, ValueError, TypeError):
+            dlina = None
+
+        stroka: dict = {"запрос": zapros, "количество": kol}
+        if dlina is not None:
+            stroka["длина_м"] = _chislo(dlina)
+
+        if not zapros or kol <= 0:
+            stroka["ошибка"] = "Не указан товар или количество."
+            est_oshibki = True
+            pozitsii_out.append(stroka)
+            continue
+
+        nahodki, _kanal = poisk.iskat(zapros, top=1)
+        if not nahodki:
+            stroka["ошибка"] = f"Товар «{zapros}» в прайсе не нашёлся."
+            est_oshibki = True
+            pozitsii_out.append(stroka)
+            continue
+
+        gruppa = nahodki[0].gruppa
+        stroka["товар"] = gruppa.obrazec.name
+
+        if dlina is not None:
+            poz = gruppa.po_dline(dlina)
+            if poz is None:
+                zamena = ", ".join(_blizhayshie_dliny(gruppa, dlina))
+                stroka["ошибка"] = (f"Длины {_chislo(dlina)} м у этого товара нет. "
+                                    f"Ближайшие: {zamena}. Предложи замену и переспроси, "
+                                    f"цену не выдумывай.")
+                est_oshibki = True
+                pozitsii_out.append(stroka)
+                continue
+        elif len(gruppa.dliny) > 1:
+            spisok = ", ".join(f"{_chislo(d)} м" for d in sorted(gruppa.dliny))
+            stroka["ошибка"] = (f"У товара несколько длин ({spisok}) — уточни у клиента, "
+                                f"какая нужна.")
+            est_oshibki = True
+            pozitsii_out.append(stroka)
+            continue
+        else:
+            poz = gruppa.obrazec
+
+        if poz.price_apiece is None:
+            stroka["ошибка"] = "Цена уточняется, в расчёт не включаю."
+            est_oshibki = True
+            pozitsii_out.append(stroka)
+            continue
+
+        cena = _rubli(poz.price_apiece)
+        summa = cena * kol            # цена целая → строка самосогласована (цена×кол=сумма)
+        stroka["цена_за_штуку"] = cena
+        stroka["сумма"] = summa
+        itogo += summa
+        pozitsii_out.append(stroka)
+
+    return {
+        "позиции": pozitsii_out,
+        "итого_посчитано": itogo,
+        "есть_нерасчитанные_строки": est_oshibki,
+        "как_ответить": (
+            "Назови клиенту каждую строку: товар, длину, количество, цену за штуку и "
+            "сумму, затем ИТОГО. Цифры бери ТОЛЬКО отсюда — свои не считай и не меняй. "
+            "По строкам с «ошибка» цену НЕ выдумывай: предложи замену/уточни, и в итог их "
+            "не включай. Есть нерасчитанные строки — не объявляй итог окончательным, сперва "
+            "закрой их с клиентом."),
+    }

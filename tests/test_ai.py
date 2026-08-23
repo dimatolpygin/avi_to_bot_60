@@ -752,3 +752,82 @@ async def test_posle_lida_pro_nomer_govorit_mozhno(poisk, cfg, monkeypatch):
 
     r = await agent.otvetit(cfg, poisk, [], "мой номер 89001234567", peredat_lead=peredat)
     assert "записала ваш номер" in r.otvet
+
+
+# ── Расчёт заказа calc_order (23.08) ─────────────────────────────────────────
+
+
+def _vyzov_rascheta(items: list[dict]) -> dict:
+    return {"id": "1", "type": "function",
+            "function": {"name": "calc_order",
+                         "arguments": json.dumps({"items": items}, ensure_ascii=False)}}
+
+
+def test_calc_order_summiruet_ceny_iz_kataloga(poisk):
+    """Цену каждой строки берём из прайса, умножаем и суммируем кодом."""
+    rez = agent._raschet_zakaza(_vyzov_rascheta([
+        {"query": "вагонка липа сорт а", "length_m": 2.5, "qty": 10},
+        {"query": "вагонка липа сорт а", "length_m": 3.0, "qty": 2},
+    ]), poisk)
+    assert [p["сумма"] for p in rez["позиции"]] == [4280, 1026]  # 428×10, 513×2
+    assert rez["итого_посчитано"] == 5306
+    assert rez["есть_нерасчитанные_строки"] is False
+
+
+def test_calc_order_otsutstvuyushchaya_dlina_ne_vydumyvaet_cenu(poisk):
+    """Длины 2,4 в прайсе нет — не цена, а честное «нет, ближайшие…»."""
+    rez = agent._raschet_zakaza(_vyzov_rascheta([
+        {"query": "вагонка липа сорт а", "length_m": 2.4, "qty": 2},
+    ]), poisk)
+    stroka = rez["позиции"][0]
+    assert "цена_за_штуку" not in stroka and "сумма" not in stroka
+    assert "нет" in stroka["ошибка"] and "2.5" in stroka["ошибка"]
+    assert rez["итого_посчитано"] == 0
+    assert rez["есть_нерасчитанные_строки"] is True
+
+
+def test_calc_order_nemernyy_beret_obrazec(poisk):
+    """У немерного товара (камни) длины нет — цена из единственной позиции."""
+    rez = agent._raschet_zakaza(_vyzov_rascheta([
+        {"query": "камни габбро", "qty": 3},
+    ]), poisk)
+    assert rez["позиции"][0]["цена_за_штуку"] == 600
+    assert rez["позиции"][0]["сумма"] == 1800
+    assert rez["итого_посчитано"] == 1800
+
+
+def test_calc_order_neskolko_dlin_bez_dliny_prosit_utochnit(poisk):
+    """У мерного товара несколько длин, а длина не задана — уточнить, не гадать."""
+    rez = agent._raschet_zakaza(_vyzov_rascheta([
+        {"query": "вагонка липа сорт а", "qty": 5},
+    ]), poisk)
+    assert "несколько длин" in rez["позиции"][0]["ошибка"]
+    assert rez["есть_нерасчитанные_строки"] is True
+
+
+def test_calc_order_tovar_ne_nayden(poisk):
+    """Товара нет в прайсе — строка с ошибкой, а не выдуманная цена."""
+    rez = agent._raschet_zakaza(_vyzov_rascheta([
+        {"query": "унитаз керамический", "qty": 1},
+    ]), poisk)
+    assert "не нашёлся" in rez["позиции"][0]["ошибка"]
+
+
+def test_calc_order_bityie_argumenty_ne_padaet(poisk):
+    """Битый JSON аргументов — не падаем, просим позвать ещё раз."""
+    vyzov = {"id": "1", "function": {"name": "calc_order", "arguments": "{битьё"}}
+    assert "ошибка" in agent._raschet_zakaza(vyzov, poisk)
+
+
+@pytest.mark.asyncio
+async def test_calc_order_prohodit_cherez_agent_loop(poisk, cfg, monkeypatch):
+    """Сквозной ход: модель зовёт calc_order, получает итог, отвечает текстом."""
+    fake = FakeChat([
+        {"content": None, "tool_calls": [_vyzov_rascheta([
+            {"query": "вагонка липа сорт а", "length_m": 2.5, "qty": 10}])]},
+        {"content": "По вагонке 2,5 м: 10 штук по 428, итого 4280 рублей.",
+         "tool_calls": None},
+    ])
+    monkeypatch.setattr(agent, "chat", fake)
+    r = await agent.otvetit(cfg, poisk, [], "посчитай 10 штук по 2,5 метра сорт А")
+    assert "4280" in r.otvet

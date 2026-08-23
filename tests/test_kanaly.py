@@ -352,7 +352,8 @@ async def test_raznye_akkaunty_otvechayut_svoim_promptom(monkeypatch):
     assert "Александра" in promt_tovarnyy and "Роман" not in promt_tovarnyy
     assert "Роман" in promt_uslugi and "500 тысяч" in promt_uslugi
     imena = lambda i: [t["function"]["name"] for t in fake.vyzovy[i]["tools"]]
-    assert imena(0) == ["search_products", "save_lead", "peredat_menedzheru"]  # у товарного все
+    assert imena(0) == ["search_products", "calc_order", "save_lead",
+                        "peredat_menedzheru"]  # у товарного все (поиск + расчёт заказа)
     assert imena(1) == ["save_lead", "peredat_menedzheru"]  # у услуг лид + передача
 
 
