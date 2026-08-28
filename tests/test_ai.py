@@ -464,12 +464,13 @@ def test_assortiment_sobiraetsya_iz_kataloga(poisk):
 
 def test_prompt_soderzhit_klyuchevye_pravila(poisk):
     prompt = agent.sobrat_prompt(poisk.katalog)
-    for pravilo in ("Сорт Б", "НЕ проси", "КВАДРАТНЫЙ МЕТР", "Александра"):
+    for pravilo in ("Сорт Б", "сначала ОТВЕТЬ", "КВАДРАТНЫЙ МЕТР", "Александра"):
         assert pravilo in prompt, f"из промпта пропало правило: {pravilo}"
-    # Контакт: спросить можно, но один раз и по делу. Обе половины правила
-    # обязаны стоять рядом — без первой лид не появится, без второй бот клянчит.
-    assert "СОЗРЕЛ" in prompt and "РОВНО ОДИН раз" in prompt
-    assert "Второй раз\n  не спрашивай" in prompt
+    # Контакт (курс заказчика 28.08): просим рано и до двух раз, но сначала ответ,
+    # а после отказа — стоп. Все три половины обязаны стоять рядом: без ранней просьбы
+    # лид утекает, без ответа-раньше бот клянчит, без стопа после отказа — навязчив.
+    assert "до ДВУХ раз" in prompt and "СОЗРЕЛ" in prompt
+    assert "больше не проси ни под каким предлогом" in prompt
 
 
 # ── Передача лида менеджеру ──────────────────────────────────────────────────
@@ -721,8 +722,8 @@ async def test_pervaya_proshba_kontakta_prohodit(poisk, cfg, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_vtoraya_proshba_kontakta_vyrezaetsya(poisk, cfg, monkeypatch):
-    """А второй раз — уже клянчанье: клиент промолчал, значит тема закрыта."""
+async def test_vtoraya_proshba_kontakta_prohodit(poisk, cfg, monkeypatch):
+    """Заказчик 28.08 разрешил до двух просьб: вторая (в истории одна) проходит."""
     fake = FakeChat([
         {"content": "Липа сорт А есть, 513 рублей за трёхметровую. Оставите номер телефона?",
          "tool_calls": None},
@@ -730,6 +731,25 @@ async def test_vtoraya_proshba_kontakta_vyrezaetsya(poisk, cfg, monkeypatch):
     monkeypatch.setattr(agent, "chat", fake)
     istoriya = [
         {"role": "assistant", "content": "Оставьте номер, я пришлю расчёт."},
+        {"role": "user", "content": "а сорт а почём"},
+    ]
+    r = await agent.otvetit(cfg, poisk, istoriya, "а сорт а почём")
+    assert "513" in r.otvet
+    assert "номер" in r.otvet.lower()
+
+
+@pytest.mark.asyncio
+async def test_tretya_proshba_kontakta_vyrezaetsya(poisk, cfg, monkeypatch):
+    """Третий раз подряд — уже клянчанье (лимит 2): просьбу режем, ответ остаётся."""
+    fake = FakeChat([
+        {"content": "Липа сорт А есть, 513 рублей за трёхметровую. Оставите номер телефона?",
+         "tool_calls": None},
+    ])
+    monkeypatch.setattr(agent, "chat", fake)
+    istoriya = [
+        {"role": "assistant", "content": "Оставьте номер, я пришлю расчёт."},
+        {"role": "user", "content": "а по длинам?"},
+        {"role": "assistant", "content": "Давайте зафиксирую, оставьте номер для расчёта."},
         {"role": "user", "content": "а сорт а почём"},
     ]
     r = await agent.otvetit(cfg, poisk, istoriya, "а сорт а почём")

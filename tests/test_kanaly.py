@@ -59,7 +59,7 @@ def test_prompt_uslug_neset_pravila_zakazchika(kod):
     при копировании промпта."""
     p = profil(kod).prompt
     assert "Никаких длинных тире" in p
-    assert "НЕ проси" in p and "РОВНО ОДИН раз" in p
+    assert "сначала ОТВЕТЬ" in p and "до ДВУХ раз" in p
     assert "Без эмодзи" in p
 
 
@@ -200,8 +200,8 @@ def test_prompt_saunamart_ne_izmenilsya_posle_vynosa_stilya():
 def test_rod_beretsya_parametrom_a_ne_ugadyvaetsya():
     zhen = agent.pravila_stilya("Александра", "Saunamart")
     muzh = agent.pravila_stilya("Роман", "SB SAUNA", zhenskiy_rod=False)
-    assert "уже здоровалась" in zhen and "первой НЕ проси" in zhen
-    assert "уже здоровался" in muzh and "первым НЕ проси" in muzh
+    assert "уже здоровалась" in zhen and "женском роде" in zhen
+    assert "уже здоровался" in muzh and "мужском роде" in muzh
 
 
 # ── Память в Redis ───────────────────────────────────────────────────────────
