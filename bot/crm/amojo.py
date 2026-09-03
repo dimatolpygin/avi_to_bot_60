@@ -258,8 +258,11 @@ class Zerkalo:
         return _uchastnik(f"bot:{self.kod}", self.imya_bota, ref_id=self.bot_ref_id)
 
     async def vhodyashchee(self, chat_id: str, msg_id: str, avtor_id, tekst: str,
-                           *, imya: str | None = None) -> None:
-        """Сообщение клиента → входящее в amoCRM (только sender)."""
+                           *, imya: str | None = None) -> bool:
+        """Сообщение клиента → входящее в amoCRM (только sender).
+
+        Возвращает True при успехе, False при сбое — по нему проход 14.13 решает,
+        помечать ли входящее зеркалированным (сбойное досылается на след. тике)."""
         try:
             otvet = await self.api.new_message(payload_soobshcheniya(
                 conversation_id=self._dialog(chat_id),
@@ -268,20 +271,25 @@ class Zerkalo:
                 tekst=tekst))
             await self._zapomnit_conv(chat_id, otvet)
             logger.info("📤 amoCRM ← клиент (чат %s): зеркалировано входящее", chat_id)
+            return True
         except Exception as e:  # noqa: BLE001 — зеркало не роняет диалог
             log_oshibka(f"amoCRM зеркало (входящее, чат {chat_id}): {e}")
+            return False
 
     async def vhodyashchee_vlozhenie(self, chat_id: str, msg_id: str, avtor_id,
                                      vlozhenie: dict, *,
-                                     imya: str | None = None) -> None:
+                                     imya: str | None = None) -> bool:
         """Вложение клиента (фото) → входящее в amoCRM как media-сообщение.
 
         Зеркалим только то, у чего есть публичный `url` (пока — картинки): без
         него amojo нечего подтягивать, а voice/video/file требуют доп. запроса за
-        файлом (это позже). Нет url → тихо выходим, диалог не трогаем."""
+        файлом (это позже). Нет url → тихо выходим, диалог не трогаем.
+
+        Возвращает True при успешной отправке, иначе False (нет url или сбой) —
+        по нему проход 14.13 решает, помечать ли вложение зеркалированным."""
         url = (vlozhenie or {}).get("url")
         if not url:
-            return
+            return False
         try:
             otvet = await self.api.new_message(payload_soobshcheniya(
                 conversation_id=self._dialog(chat_id),
@@ -293,8 +301,10 @@ class Zerkalo:
             await self._zapomnit_conv(chat_id, otvet)
             logger.info("📤 amoCRM ← клиент (чат %s): зеркалировано вложение (%s)",
                         chat_id, vlozhenie.get("tip"))
+            return True
         except Exception as e:  # noqa: BLE001 — зеркало не роняет диалог
             log_oshibka(f"amoCRM зеркало (вложение, чат {chat_id}): {e}")
+            return False
 
     async def ishodyashchee(self, chat_id: str, tekst: str, *, avtor_id=None,
                             imya_klienta: str | None = None,
