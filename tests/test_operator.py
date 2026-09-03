@@ -212,6 +212,36 @@ async def test_sboy_redis_v_zhurnale_schitaet_bot():
     assert await op.bot_otpravlyal("saunamart", "c1", "любой") is True
 
 
+# ── Журнал зеркалированных входящих (14.13) ──────────────────────────────────
+
+async def test_vhodyashchee_zerkalen_dedup():
+    op = Operatory(FakeRedis())
+    assert await op.vhodyashchee_zerkalen("sbsauna", "c1", "m1") is False
+    await op.zapomnit_vhodyashchee_zerkalirovannoe("sbsauna", "c1", "m1")
+    assert await op.vhodyashchee_zerkalen("sbsauna", "c1", "m1") is True
+    assert await op.vhodyashchee_zerkalen("sbsauna", "c1", "m2") is False   # другое — нет
+
+
+async def test_vhodyashchee_zerkalen_perezhivaet_restart():
+    # Журнал в Redis: новый экземпляр Operatory (как после рестарта процесса) на том
+    # же Redis видит уже зеркалированное — одно сообщение уходит в amoCRM один раз.
+    r = FakeRedis()
+    await Operatory(r).zapomnit_vhodyashchee_zerkalirovannoe("sbsauna", "c1", "m1")
+    assert await Operatory(r).vhodyashchee_zerkalen("sbsauna", "c1", "m1") is True
+
+
+async def test_vhodyashchee_zerkalen_sboy_redis_dosylaet():
+    # Инвертированный край: не прочитали журнал → False (досылаем), потеря телефона
+    # клиента хуже дубля, а дубль схлопнёт идемпотентность amojo по msgid.
+    op = Operatory(FakeRedis(padat=True))
+    assert await op.vhodyashchee_zerkalen("sbsauna", "c1", "m1") is False
+
+
+async def test_vhodyashchee_zerkalen_pustoy_id():
+    op = Operatory(FakeRedis())
+    assert await op.vhodyashchee_zerkalen("sbsauna", "c1", None) is False
+
+
 # ── Детектор последнего исходящего ────────────────────────────────────────────
 
 def test_posledny_ishodyashchiy_beret_svezhee_out():

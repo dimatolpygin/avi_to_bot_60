@@ -32,6 +32,7 @@ from .logger import log_oshibka
 _PREFIKS_FLAG = "sbavito:operator"       # :{kod}:{chat} → "1", пока ведёт оператор
 _PREFIKS_BOT = "sbavito:botmsg"          # :{kod}:{chat} → список id реплик бота
 _PREFIKS_ZERK = "sbavito:opzerk"         # :{kod}:{chat} → id операторских реплик, уже в amoCRM
+_PREFIKS_VZERK = "sbavito:vhzerk"        # :{kod}:{chat} → id входящих клиента, уже в amoCRM (14.13)
 _HRANIT_ID = 50                          # сколько последних id реплик бота помним
 TTL_VOZVRATA_S = 3 * 24 * 3600           # 3 суток тишины → бот включается сам
 
@@ -55,6 +56,7 @@ class Operatory:
         self._flagi: dict[str, float] = {}            # фолбэк без Redis: key → истечёт в
         self._otpravleno: dict[str, list[str]] = {}
         self._zerkaleno: dict[str, list[str]] = {}
+        self._vh_zerkaleno: dict[str, list[str]] = {}  # 14.13: входящие, уже в amoCRM
 
     @staticmethod
     def _kl_flag(kod, chat) -> str:
@@ -67,6 +69,10 @@ class Operatory:
     @staticmethod
     def _kl_zerk(kod, chat) -> str:
         return f"{_PREFIKS_ZERK}:{kod}:{chat}"
+
+    @staticmethod
+    def _kl_vzerk(kod, chat) -> str:
+        return f"{_PREFIKS_VZERK}:{kod}:{chat}"
 
     # ── Флаг перехвата ───────────────────────────────────────────────────────
 
@@ -212,3 +218,46 @@ class Operatory:
             await self._redis.ltrim(klyuch, -_HRANIT_ID, -1)
         except Exception as e:  # noqa: BLE001
             log_oshibka(f"Оператор: не записал id зеркалирования {klyuch}: {e}")
+
+    # ── Журнал зеркалированных ВХОДЯЩИХ клиента (дедуп прохода 14.13) ──────────
+
+    async def vhodyashchee_zerkalen(self, kod, chat, msg_id) -> bool:
+        """Уже зеркалировали это входящее клиента в amoCRM?
+
+        Курс дедупа прохода 14.13: журнал общий с основным поллером — тот метит
+        каждое своё успешно зеркалированное входящее (`obrabotchik`), а проход
+        досылает лишь непомеченное. Журнал переживает рестарт (Redis-список),
+        поэтому одно сообщение уходит в карточку ровно один раз.
+
+        Край ПЕРЕВЁРНУТ относительно операторского (`operator_zerkalen`): там
+        перекос «не зеркалить» (двойная реплика менеджера хуже потери), здесь —
+        «зеркалировать» (потерять телефон клиента хуже дубля, а дубль всё равно
+        схлопнет идемпотентность amojo по `msgid`). Поэтому сбой кеша → False
+        (досылаем), пустой id → False (нечего дедупить, но и мешать нечему)."""
+        if not msg_id:
+            return False
+        klyuch = self._kl_vzerk(kod, chat)
+        if self._redis is None:
+            return str(msg_id) in self._vh_zerkaleno.get(klyuch, [])
+        try:
+            spisok = await self._redis.lrange(klyuch, 0, -1)
+            return str(msg_id) in [_dekod(x) for x in spisok]
+        except Exception as e:  # noqa: BLE001 — не проверили → досылаем (amojo дедупит)
+            log_oshibka(f"Оператор: не прочитал журнал входящих зеркал {klyuch}: {e}")
+            return False
+
+    async def zapomnit_vhodyashchee_zerkalirovannoe(self, kod, chat, msg_id) -> None:
+        """Пометить входящее клиента как уже ушедшее в amoCRM (дедуп 14.13)."""
+        if not msg_id:
+            return
+        klyuch = self._kl_vzerk(kod, chat)
+        if self._redis is None:
+            spisok = self._vh_zerkaleno.setdefault(klyuch, [])
+            spisok.append(str(msg_id))
+            del spisok[:-_HRANIT_ID]
+            return
+        try:
+            await self._redis.rpush(klyuch, str(msg_id))
+            await self._redis.ltrim(klyuch, -_HRANIT_ID, -1)
+        except Exception as e:  # noqa: BLE001
+            log_oshibka(f"Оператор: не записал id входящего зеркала {klyuch}: {e}")

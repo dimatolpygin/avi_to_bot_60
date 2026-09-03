@@ -32,6 +32,8 @@ from ..logger import log_oshibka, logger
 BASE = "https://api.avito.ru"
 TAYMAUT_S = 30.0
 INTERVAL_POLLINGA_S = 5.0        # как часто спрашиваем новые чаты
+INTERVAL_ZERKALIROVANIYA_S = 20.0  # проход зеркала (14.13) реже основного поллинга
+LIMIT_CHATOV_ZERKALA = 50        # сколько недавних чатов сметает проход зеркала за тик
 ZAPAS_TOKENA_S = 60.0            # обновляем токен за минуту до истечения
 
 
@@ -504,10 +506,19 @@ async def zapustit(kod: str, cfg: AvitoConfig, yadro, stop: asyncio.Event, *,
                     ", зеркало в amoCRM" if zerkalo is not None else "",
                     ", журнал в БД" if zhurnal is not None else "",
                     ", перехват оператором" if operatory is not None else "")
-        await cikl_pollinga(
-            api, sdelat_obrabotchik(kod, api, yadro, belyy_spisok,
-                                    zerkalo=zerkalo, zhurnal=zhurnal,
-                                    operatory=operatory), stop)
+        obrabotchik = sdelat_obrabotchik(kod, api, yadro, belyy_spisok,
+                                         zerkalo=zerkalo, zhurnal=zhurnal,
+                                         operatory=operatory)
+        zadachi = [cikl_pollinga(api, obrabotchik, stop)]
+        # Проход зеркалирования (14.13): ловит чаты, которые менеджер прочитал/ведёт
+        # в приложении Авито (unread снят) — их основной поллер не видит. Только
+        # зеркалит, не отвечает; нужен и зеркало, и журнал оператора для дедупа.
+        if zerkalo is not None and operatory is not None:
+            zadachi.append(cikl_zerkalirovaniya(
+                api, kod, zerkalo, operatory, stop, belyy_spisok=belyy_spisok))
+            logger.info("🪞 Авито «%s»: включён проход зеркалирования (14.13, "
+                        "интервал %.0f c)", kod, INTERVAL_ZERKALIROVANIYA_S)
+        await asyncio.gather(*zadachi)
 
 
 async def _zerkalit_operatora(zerkalo, operatory, kod: str, chat_id: str,
@@ -542,6 +553,103 @@ async def _zerkalit_operatora(zerkalo, operatory, kod: str, chat_id: str,
         await operatory.zapomnit_zerkalirovannoe(kod, chat_id, mid)
         logger.info("📤 amoCRM ← оператор (чат %s): зеркалирован ручной ответ менеджера",
                     chat_id)
+
+
+def _avtor_chata(msgs: list[dict]) -> int | None:
+    """author_id клиента из окна сообщений (по последнему входящему).
+
+    Нужен как `receiver` для зеркалирования ручного ответа менеджера (14.12) в
+    проходе 14.13. Нет входящих в окне → None (зеркало подставит chat_id)."""
+    posl = posledny_vhodyashchiy(msgs)
+    return posl.get("author_id") if posl else None
+
+
+async def _zerkalit_vhodyashchie_svip(zerkalo, operatory, kod: str, chat_id: str,
+                                      msgs: list[dict]) -> None:
+    """Досылать в amoCRM входящие клиента, которых там ещё нет (проход 14.13).
+
+    Идём по входящим окна в хронологии; msg_id, уже помеченный зеркалированным
+    (журнал `Operatory.vhodyashchee_zerkalen`, общий с основным поллером — тот
+    метит каждое своё успешно зеркалированное входящее), пропускаем. Текст →
+    `vhodyashchee`, фото с публичным url → `vhodyashchee_vlozhenie`; служебные и
+    исходящие отсеивает `_vhodyashchee_iz_soobshcheniya`. Метим ТОЛЬКО при успехе
+    (зеркало вернуло True): сбойное входящее досылается на следующем тике, а
+    вложение без публичного url не метим вовсе — его в amoCRM пока нечем показать,
+    но и в бесконечный ретрай оно не уходит (нет url → зеркало вернёт False, но
+    такое сообщение и основной поллер не зеркалит)."""
+    poryadok = sorted((m for m in msgs if isinstance(m, dict)),
+                      key=lambda m: m.get("created") or 0)
+    for m in poryadok:
+        v = _vhodyashchee_iz_soobshcheniya(chat_id, m, None)
+        if v is None:
+            continue
+        if await operatory.vhodyashchee_zerkalen(kod, chat_id, v.msg_id):
+            continue
+        if v.tekst:
+            ok = await zerkalo.vhodyashchee(chat_id, v.msg_id, v.author_id, v.tekst)
+        elif v.vlozhenie and v.vlozhenie.get("url"):
+            ok = await zerkalo.vhodyashchee_vlozhenie(
+                chat_id, v.msg_id, v.author_id, v.vlozhenie)
+        else:
+            continue                       # нечего зеркалить (пустой текст / вложение без url)
+        if ok:
+            await operatory.zapomnit_vhodyashchee_zerkalirovannoe(kod, chat_id, v.msg_id)
+            logger.info("📤 amoCRM ← клиент (чат %s): досыл зеркала проходом 14.13", chat_id)
+
+
+async def cikl_zerkalirovaniya(api: AvitoAPI, kod: str, zerkalo, operatory,
+                               stop: asyncio.Event, *,
+                               belyy_spisok: frozenset[str] | None = None,
+                               interval_s: float = INTERVAL_ZERKALIROVANIYA_S,
+                               limit_chatov: int = LIMIT_CHATOV_ZERKALA) -> None:
+    """Проход зеркалирования по ВСЕМ недавним чатам, не только непрочитанным (14.13).
+
+    Основной поллер (`cikl_pollinga`) берёт только `unread_only=true`. Когда
+    менеджер отвечает клиенту ВРУЧНУЮ в приложении Авито, чат помечается
+    прочитанным со стороны аккаунта — и основной поллер его больше не видит:
+    входящие клиента (в т.ч. телефон) после этого не доезжают в amoCRM. Этот
+    проход независим от unread: сметает недавние чаты и досылает в карточку всё,
+    что ещё не зеркалено — входящие клиента (`_zerkalit_vhodyashchie_svip`) и
+    ручные ответы менеджера (`_zerkalit_operatora`, как в основном поллере).
+
+    Путь ОТВЕТА бота проход НЕ трогает: ядро не зовётся, реплик не шлём — только
+    зеркалим. Поэтому задвоения ответов бота нет (критерий 14.13). Дедуп — по
+    журналу `Operatory` (Redis, переживает рестарт) плюс идемпотентность amojo по
+    `msgid`; одно сообщение уходит в карточку ровно один раз.
+
+    Идёт реже основного поллинга (`interval_s`): для читаемого чата задержка
+    зеркала в ~20 c некритична, а нагрузку на Авито API держит низкой. Сбой одного
+    чата или тика не роняет проход — логируем и идём дальше (как `cikl_pollinga`).
+    """
+    while not stop.is_set():
+        try:
+            for chat in await api.chaty(tolko_neprochitannye=False, limit=limit_chatov):
+                chat_id = str(chat.get("id"))
+                if belyy_spisok is not None and chat_id not in belyy_spisok:
+                    continue
+                # Вакансия (наём) — соискатель, не клиент: как и основной поллер,
+                # такой чат в воронку не тянем (ни входящие, ни ответы менеджера).
+                if _obyavlenie_vakansiya(_obyavlenie_chata(chat)):
+                    continue
+                try:
+                    msgs = await api.soobshcheniya(chat_id)
+                except Exception as e:  # noqa: BLE001 — один чат не роняет проход
+                    log_oshibka(f"Зеркало-проход: окно чата {chat_id}: {e}")
+                    continue
+                await _zerkalit_vhodyashchie_svip(zerkalo, operatory, kod, chat_id, msgs)
+                # Ручные ответы менеджера — только когда бот в чате уже отметился
+                # (иначе холодный старт залил бы историю, см. `_zerkalit_operatora`).
+                if await operatory.aktiven(kod, chat_id):
+                    await _zerkalit_operatora(zerkalo, operatory, kod, chat_id,
+                                              _avtor_chata(msgs), msgs)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:  # noqa: BLE001 — проход живёт дальше
+            log_oshibka(f"Зеркало-проход Авито «{kod}»: сбой цикла: {e}")
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=interval_s)
+        except asyncio.TimeoutError:
+            pass
 
 
 async def _operator_perehvatil(operatory, kod: str, api: AvitoAPI,
@@ -647,8 +755,11 @@ def sdelat_obrabotchik(kod: str, api: AvitoAPI, yadro,
             # менеджер увидит фото клиента даже если бот под оператором молчит;
             # прочитать картинку бот не может, ядру передавать нечего.
             if zerkalo is not None and v.vlozhenie:
-                await zerkalo.vhodyashchee_vlozhenie(
+                ok = await zerkalo.vhodyashchee_vlozhenie(
                     v.chat_id, v.msg_id, v.author_id, v.vlozhenie, imya=imya)
+                if ok and operatory is not None:
+                    await operatory.zapomnit_vhodyashchee_zerkalirovannoe(
+                        kod, v.chat_id, v.msg_id)
             if zhurnal is not None:
                 await zhurnal.vhodyashchee(
                     v.chat_id, _marker_vlozheniya(v.vlozhenie), imya=imya)
@@ -705,7 +816,12 @@ def sdelat_obrabotchik(kod: str, api: AvitoAPI, yadro,
         # попросить, если дальше опять пришлёт только вложение.
         poprosili_tekst.discard(v.chat_id)
         if zerkalo is not None:
-            await zerkalo.vhodyashchee(v.chat_id, v.msg_id, v.author_id, v.tekst)
+            # Метим входящее зеркалированным ТОЛЬКО при успехе — тогда проход
+            # 14.13 его не досылает, а сбойное (ok=False) досылает на своём тике.
+            ok = await zerkalo.vhodyashchee(v.chat_id, v.msg_id, v.author_id, v.tekst)
+            if ok and operatory is not None:
+                await operatory.zapomnit_vhodyashchee_zerkalirovannoe(
+                    kod, v.chat_id, v.msg_id)
         if zhurnal is not None:
             await zhurnal.vhodyashchee(v.chat_id, v.tekst, imya=imya)
         # Перехват оператором (14.8): менеджер ответил вручную → бот молчит. Вопрос

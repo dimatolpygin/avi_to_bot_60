@@ -12,10 +12,12 @@ import httpx
 import pytest
 
 from bot.channels.avito import (AvitoAPI, OshibkaAvito, Vidennye, Vhodyashchee,
-                                 _sobrat_vhodyashchie, cikl_pollinga,
+                                 _sobrat_vhodyashchie, _zerkalit_vhodyashchie_svip,
+                                 cikl_pollinga, cikl_zerkalirovaniya,
                                  izvlech_vhodyashchee, posledny_vhodyashchiy,
                                  sdelat_obrabotchik)
 from bot.config import AvitoConfig
+from bot.operator import Operatory
 
 CFG = AvitoConfig(client_id="cid", client_secret="sec", user_id=23598618)
 
@@ -687,3 +689,160 @@ async def test_obychnoe_obyavlenie_ne_prinimaetsya_za_vakansiyu():
     await obr(izvlech_vhodyashchee(_chat_vhod(chat_id="c1", text="есть в наличии?", item=item)))
 
     assert ya.obrabotano == [("saunamart", "c1", "есть в наличии?")]
+
+
+# ── Проход зеркалирования по прочитанным чатам (14.13) ────────────────────────
+
+class _ZerkaloZhurnal:
+    """Зеркало, записывающее вызовы и возвращающее bool-успех (как настоящее)."""
+
+    def __init__(self, ok=True):
+        self._ok = ok
+        self.vhod = []          # (chat_id, msg_id, tekst)
+        self.vhod_vlozh = []    # (chat_id, msg_id)
+        self.ishod = []         # (chat_id, tekst, msgid)
+
+    async def vhodyashchee(self, chat_id, msg_id, author_id, tekst, *, imya=None):
+        self.vhod.append((chat_id, msg_id, tekst))
+        return self._ok
+
+    async def vhodyashchee_vlozhenie(self, chat_id, msg_id, author_id, vlozhenie, *, imya=None):
+        self.vhod_vlozh.append((chat_id, msg_id))
+        return self._ok
+
+    async def ishodyashchee(self, chat_id, tekst, *, avtor_id=None,
+                            imya_klienta=None, msgid=None):
+        self.ishod.append((chat_id, tekst, msgid))
+        return self._ok
+
+
+class _ApiSvip:
+    """Фейк API для прохода зеркалирования: отдаёт заданные чаты и окна сообщений.
+
+    `stop` (если задан) взводится на первом `soobshcheniya` — один тик прохода."""
+
+    def __init__(self, chats, okna, *, stop=None):
+        self._chats = chats
+        self._okna = okna
+        self._stop = stop
+        self.otpravleno = []
+        self.chaty_neprochit = []       # с каким unread_only звали chaty
+
+    async def chaty(self, *, tolko_neprochitannye=True, limit=100):
+        self.chaty_neprochit.append(tolko_neprochitannye)
+        if self._stop is not None:
+            self._stop.set()            # один тик: взводим В НАЧАЛЕ, тик доходит до конца
+        return self._chats
+
+    async def soobshcheniya(self, chat_id, *, limit=20):
+        return self._okna.get(chat_id, [])
+
+    async def otpravit(self, chat_id, tekst):
+        self.otpravleno.append((chat_id, tekst))
+        return {"id": "p1"}
+
+
+async def _odin_tik_zerkala(api, zer, op, *, belyy_spisok=None):
+    stop = asyncio.Event()
+    api._stop = stop
+    await asyncio.wait_for(
+        cikl_zerkalirovaniya(api, "sbsauna", zer, op, stop,
+                             belyy_spisok=belyy_spisok, interval_s=0.01),
+        timeout=2.0)
+
+
+async def test_svip_zerkalit_vhodyashchee_iz_prochitannogo_chata():
+    # Ядро бага 14.13: чат прочитан менеджером (unread снят), основной поллер его
+    # не видит — проход берёт ВСЕ чаты и досылает входящее клиента в amoCRM.
+    api = _ApiSvip([{"id": "c1"}],
+                   {"c1": [_msg("m1", text="+79034502777", created=1)]})
+    zer, op = _ZerkaloZhurnal(), Operatory(redis=None)
+
+    await _odin_tik_zerkala(api, zer, op)
+
+    assert api.chaty_neprochit == [False]                 # брал ВСЕ чаты, не только unread
+    assert zer.vhod == [("c1", "m1", "+79034502777")]     # телефон доехал в amoCRM
+    assert api.otpravleno == []                            # проход НЕ отвечает клиенту
+
+
+async def test_svip_ne_dublit_odno_soobshchenie_mezhdu_tikami():
+    # Дедуп по журналу: одно и то же входящее зеркалится РОВНО один раз, даже если
+    # проход прошёл по чату дважды (журнал `Operatory` переживает тики).
+    api = _ApiSvip([{"id": "c1"}], {"c1": [_msg("m1", text="привет", created=1)]})
+    zer, op = _ZerkaloZhurnal(), Operatory(redis=None)
+
+    await _odin_tik_zerkala(api, zer, op)
+    await _odin_tik_zerkala(api, zer, op)                  # второй проход — то же окно
+
+    assert zer.vhod == [("c1", "m1", "привет")]            # зеркалировано один раз
+
+
+async def test_svip_ne_dublit_to_chto_uzhe_zerkalil_osnovnoy_poller():
+    # Кооперация с основным поллером: он метит успешно зеркалированное входящее,
+    # проход его не досылает. Иначе каждое сообщение уходило бы в amoCRM дважды.
+    ya, api_obr, zer = _FakeYadro(), _ApiSId(), _ZerkaloZhurnal()
+    op = Operatory(redis=None)
+    obr = sdelat_obrabotchik("sbsauna", api_obr, ya, None, zerkalo=zer, operatory=op)
+    await obr(izvlech_vhodyashchee(_chat_vhod(chat_id="c1", msg_id="m1", text="привет")))
+    assert zer.vhod == [("c1", "m1", "привет")]            # поллер зеркалировал и пометил
+
+    api_svip = _ApiSvip([{"id": "c1"}], {"c1": [_msg("m1", text="привет", created=1)]})
+    await _odin_tik_zerkala(api_svip, zer, op)
+
+    assert zer.vhod == [("c1", "m1", "привет")]            # проход НЕ досылал повторно
+
+
+async def test_svip_dosylaet_esli_zerkalo_pollera_sboinulo():
+    # Само-исцеление: если у поллера зеркалирование входящего упало (ok=False), он
+    # НЕ метит журнал — и проход досылает это входящее на своём тике.
+    ya, api_obr = _FakeYadro(), _ApiSId()
+    zer_sboy = _ZerkaloZhurnal(ok=False)
+    op = Operatory(redis=None)
+    obr = sdelat_obrabotchik("sbsauna", api_obr, ya, None, zerkalo=zer_sboy, operatory=op)
+    await obr(izvlech_vhodyashchee(_chat_vhod(chat_id="c1", msg_id="m1", text="телефон")))
+    assert not await op.vhodyashchee_zerkalen("sbsauna", "c1", "m1")   # сбой → не помечено
+
+    zer_ok = _ZerkaloZhurnal(ok=True)
+    api_svip = _ApiSvip([{"id": "c1"}], {"c1": [_msg("m1", text="телефон", created=1)]})
+    await _odin_tik_zerkala(api_svip, zer_ok, op)
+
+    assert zer_ok.vhod == [("c1", "m1", "телефон")]        # проход досла́л потерянное
+
+
+async def test_svip_zerkalit_ruchnoy_otvet_menedzhera():
+    # Проход зеркалит и ручной ответ менеджера в Авито (как основной поллер, 14.12),
+    # но только когда бот в чате уже отметился (aktiven).
+    op = Operatory(redis=None)
+    await op.zapomnit_otpravlennoe("sbsauna", "c1", "bot-1")   # бот тут говорил → aktiven
+    okno = [_msg("bot-1", direction="out", text="ответ бота", created=1),
+            _msg("mgr-1", direction="out", text="куда направить смету?", created=2)]
+    api = _ApiSvip([{"id": "c1"}], {"c1": okno})
+    zer = _ZerkaloZhurnal()
+
+    await _odin_tik_zerkala(api, zer, op)
+
+    # Реплика бота (в журнале) пропущена, ручная реплика менеджера — зеркалирована.
+    assert zer.ishod == [("c1", "куда направить смету?", "avito-out:mgr-1")]
+
+
+async def test_svip_uvazhaet_belyy_spisok():
+    # На whitelist-режиме проход не трогает чаты вне списка (как основной поллер).
+    api = _ApiSvip([{"id": "c1"}, {"id": "c2"}],
+                   {"c1": [_msg("m1", text="свой", created=1)],
+                    "c2": [_msg("m2", text="чужой", created=1)]})
+    zer, op = _ZerkaloZhurnal(), Operatory(redis=None)
+
+    await _odin_tik_zerkala(api, zer, op, belyy_spisok=frozenset({"c1"}))
+
+    assert zer.vhod == [("c1", "m1", "свой")]              # c2 вне списка — пропущен
+
+
+async def test_svip_propuskaet_vakansiyu():
+    # Чат под объявлением-вакансией (наём) проход тоже игнорит — соискатель не лид.
+    chat = {"id": "c1", "context": {"type": "item", "value": _VAKANSIYA}}
+    api = _ApiSvip([chat], {"c1": [_msg("m1", text="по вакансии", created=1)]})
+    zer, op = _ZerkaloZhurnal(), Operatory(redis=None)
+
+    await _odin_tik_zerkala(api, zer, op)
+
+    assert zer.vhod == []                                  # вакансия — не в воронку
