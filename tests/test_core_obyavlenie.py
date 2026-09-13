@@ -7,7 +7,7 @@
 from __future__ import annotations
 
 from bot.config import (Config, GoogleConfig, OpenRouterConfig, PgConfig)
-from bot.core import Yadro, _fakt_obyavleniya
+from bot.core import Yadro, _fakt_obyavleniya, _fakt_daty, _rabochiy_den
 from bot.pamyat import PamyatRedis
 
 
@@ -96,6 +96,22 @@ def test_fakt_bez_zagolovka_pust():
     assert _fakt_obyavleniya({"price_string": "от 1 ₽"}, opisanie="что-то") == ""
 
 
+def test_fakt_daty_soderzhit_den_i_chasy():
+    fakt = _fakt_daty()
+    # Факт всегда называет текущий момент по Краснодару и часы работы.
+    assert "СЕЙЧАС (время Краснодара" in fakt
+    assert any(d in fakt for d in ("понедельник", "вторник", "среда", "четверг",
+                                   "пятница", "суббота", "воскресенье"))
+    assert "с 9:00 до 18:00" in fakt
+
+
+def test_rabochiy_den_po_dnyam_nedeli():
+    assert "9:00 до 18:00" in _rabochiy_den(0)      # понедельник
+    assert "9:00 до 18:00" in _rabochiy_den(4)      # пятница
+    assert "10:00 до 16:00" in _rabochiy_den(5)     # суббота — короткий
+    assert "выходной" in _rabochiy_den(6)           # воскресенье
+
+
 def test_sistemny_podmeshivaet_obyavlenie_po_klyuchu():
     ya = _yadro()
     ya._prompty["sbsauna"] = "БАЗОВЫЙ ПРОМПТ"
@@ -105,7 +121,9 @@ def test_sistemny_podmeshivaet_obyavlenie_po_klyuchu():
     s_bez = ya._sistemny("sbsauna", "sbsauna:c2")     # другой чат — факта нет
 
     assert "БАЗОВЫЙ ПРОМПТ" in s_obyavl and "Отделка под ключ" in s_obyavl
-    assert s_bez == "БАЗОВЫЙ ПРОМПТ"
+    # У другого чата факта объявления нет, но база и дата (она всегда) остаются.
+    assert "БАЗОВЫЙ ПРОМПТ" in s_bez and "Отделка под ключ" not in s_bez
+    assert "СЕЙЧАС (время Краснодара" in s_bez
 
 
 def test_zabyt_obyavlenie_snimaet_fakt():
@@ -113,4 +131,6 @@ def test_zabyt_obyavlenie_snimaet_fakt():
     ya._prompty["sbsauna"] = "БАЗА"
     ya.zapomnit_obyavlenie("sbsauna", "c1", {"title": "Тест"})
     ya.zapomnit_obyavlenie("sbsauna", "c1", None)     # чат отвязался
-    assert ya._sistemny("sbsauna", "sbsauna:c1") == "БАЗА"
+    s = ya._sistemny("sbsauna", "sbsauna:c1")
+    assert "БАЗА" in s and "Тест" not in s            # объявление снято
+    assert "СЕЙЧАС (время Краснодара" in s            # дата подмешивается всегда
