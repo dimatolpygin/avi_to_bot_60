@@ -213,7 +213,11 @@ async def main() -> None:
         # ~10 минут. Поднимаем только когда синк включён (задан ключ) и товарный
         # бот реально работает — каталог в память перегружать некому иначе.
         # После записи в БД синк горячо перезагружает каталог в памяти (A5).
-        if cfg.google.vklyuchena and cfg.google.katalog and "saunamart" in zhivye:
+        # ⚠️ Готовность считаем по `gotovit` (Telegram ∪ Авито), а НЕ по `zhivye`
+        # (только Telegram): на проде TG-токены пусты (флуд-контроль), а saunamart
+        # живёт на Авито. Раньше гейт стоял на `zhivye`, и синк каталога молча не
+        # запускался, хотя товарный бот работал (синк знаний рядом уже на `gotovit`).
+        if cfg.google.vklyuchena and cfg.google.katalog and "saunamart" in gotovit:
             from . import sinhronizatsiya
 
             async def _perezagruzit() -> None:
