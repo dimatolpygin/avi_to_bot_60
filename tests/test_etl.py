@@ -269,6 +269,15 @@ def test_russkie_zagolovki_ceny_raspoznayutsya():
     assert prays.stroki[0].nalichie_syroe == "Да"
 
 
+def test_zagolovok_ceny_slitno_raspoznaetsya():
+    """Заказчик в живой таблице пишет заголовок слитно («ценаштука»): без этого
+    алиаса синк падал на «нет колонки price_apiece» и каталог не обновлялся."""
+    syrye = _russkiy_list()
+    syrye[0][4] = "ценаштука"        # вместо «цена штука» — как в реальной таблице
+    prays = _sobrat(syrye)
+    assert prays.stroki[0].price_apiece == Decimal("85")
+
+
 def test_zagolovok_ne_pervoy_strokoy_nahoditsya():
     """Как в CSV-выгрузке: сверху две мусорные строки, заголовок ниже."""
     syrye = [["мусор"], [""], *_russkiy_list()]

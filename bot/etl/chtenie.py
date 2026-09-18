@@ -48,6 +48,10 @@ ALIASY_KOLONOK = {
     "characteristics": "characteristics", "характеристики": "characteristics",
     "price_apiece": "price_apiece", "цена штука": "price_apiece",
     "цена за штуку": "price_apiece", "цена шт": "price_apiece",
+    # Заказчик в живой таблице пишет заголовок слитно, без пробела («ценаштука»);
+    # normalizovat склеенное не разожмёт, поэтому держим и такой вариант — иначе
+    # синк падает на «нет колонки price_apiece» и каталог не обновляется вовсе.
+    "ценаштука": "price_apiece", "ценашт": "price_apiece",
     "price_per_meter": "price_per_meter", "цена м.п.": "price_per_meter",
     "цена мп": "price_per_meter", "цена за м.п.": "price_per_meter",
     "price_per_m2": "price_per_m2", "цена за м2": "price_per_m2",
