@@ -164,6 +164,14 @@ async def test_round_robin_bez_redis_pervyy():
     assert await vybrat_menedzhera(None, "saunamart") == 2766675
 
 
+async def test_deshman_vsegda_na_ranevskogo():
+    """Решение заказчика 24.09: все лиды Дешмана — на Дениса Раневского (659847),
+    без круга. Список из одного менеджера → всегда он, даже при живом Redis."""
+    r = _FakeRedis()
+    vybor = [await vybrat_menedzhera(r, "sbsauna_deshman") for _ in range(4)]
+    assert vybor == [659847, 659847, 659847, 659847]
+
+
 async def test_round_robin_redis_upal_pervyy():
     class _Bad:
         async def incr(self, key):
