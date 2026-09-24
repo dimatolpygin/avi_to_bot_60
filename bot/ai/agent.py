@@ -241,6 +241,25 @@ def _zadala_vopros(tekst: str) -> bool:
     return "?" in tekst
 
 
+#: Телефонообразная подстрока: цифры, возможно с +, пробелами, дефисами, скобками.
+#: Требуем непрерывный прогон (буквы/запятые его рвут) — иначе размеры парной
+#: «3 на 2,3 метра, высота 2,8» с разбросанными цифрами приняли бы за номер.
+_RE_TELEFON = re.compile(r"\+?\d[\d\s()\-]{8,}\d")
+
+
+def _dal_telefon(tekst: str) -> bool:
+    """Клиент прислал номер телефона (в сообщении есть прогон из 10–11 цифр).
+
+    Триггер предохранителя: на такое сообщение модель ОБЯЗАНА позвать save_lead,
+    а не отвечать «записал» словами (живой баг 22.09: номер пришёл, лид утёк —
+    ни контакта, ни задачи в amoCRM). 10–11 цифр отсекают габариты/количества.
+    """
+    for kandidat in _RE_TELEFON.findall(tekst):
+        if 10 <= sum(c.isdigit() for c in kandidat) <= 11:
+            return True
+    return False
+
+
 #: Сколько раз за диалог боту можно попросить контакт. Заказчик 28.08 сменил курс
 #: «спросить один раз» → «раньше и настойчивее»: тёплые диалоги затухали без номера,
 #: контакт нужен почти с каждого лида. Разрешены ранняя просьба + один мягкий повтор
@@ -420,6 +439,9 @@ INSTRUMENT_RASCHET = {
 #: Значение `tool_choice` для предохранителей: заставить модель вызвать именно
 #: поиск. Просто "required" тут не годится — она вправе выбрать save_lead.
 FORSIROVAT_POISK = {"type": "function", "function": {"name": "search_products"}}
+#: То же для лида: клиент дал номер, а модель ответила «записал» словами, не вызвав
+#: инструмент — заставляем вызвать именно save_lead, чтобы контакт дошёл до менеджера.
+FORSIROVAT_LEAD = {"type": "function", "function": {"name": "save_lead"}}
 
 INSTRUMENTY = [{
     "type": "function",
@@ -683,6 +705,7 @@ class OtvetAgenta:
     naydeno: int = 0
     forsirovan_poisk: bool = False
     lead_peredan: bool = False
+    forsirovan_lead: bool = False
 
 
 async def otvetit(cfg: OpenRouterConfig, poisk: Poisk | None, istoriya: list[dict],
@@ -733,16 +756,17 @@ async def otvetit(cfg: OpenRouterConfig, poisk: Poisk | None, istoriya: list[dic
     naydeno = 0
     lead_peredan = False
     dialog_peredan = False   # передан ли диалог менеджеру за этот ход (14.11)
-    forsirovano = False      # предохранитель срабатывает не больше раза за ход
-    forsim_seychas = False
+    forsirovano = False      # предохранитель поиска срабатывает не больше раза за ход
+    forsirovan_lead = False  # предохранитель лида — тоже один раз за ход
+    chem_forsirovat = None    # tool_choice на следующую итерацию (или None → "auto")
 
     for _ in range(ITERACIY):
-        # Форсируем ИМЕННО поиск, а не «любой инструмент»: с появлением save_lead
-        # значение "required" разрешило бы модели вместо прайса дёрнуть передачу
-        # лида — то есть предохранитель начал бы просить телефон вместо поиска.
+        # Форсируем ИМЕННО нужный инструмент, а не «любой»: "required" разрешил бы
+        # модели дёрнуть не то (вместо прайса — лида, и наоборот). `chem_forsirovat`
+        # ставит предохранитель на один следующий заход.
         rezultat = await chat(cfg, soobshcheniya, instrumenty,
-                              tool_choice=FORSIROVAT_POISK if forsim_seychas else "auto")
-        forsim_seychas = False
+                              tool_choice=chem_forsirovat or "auto")
+        chem_forsirovat = None
 
         if rezultat.get("tool_calls"):
             soobshcheniya.append({"role": "assistant",
@@ -830,7 +854,7 @@ async def otvetit(cfg: OpenRouterConfig, poisk: Poisk | None, istoriya: list[dic
         if (poisk is not None and not zaprosy_poiska and not forsirovano
                 and _zayavil_otkaz(otvet)):
             forsirovano = True
-            forsim_seychas = True
+            chem_forsirovat = FORSIROVAT_POISK
             logger.warning("🧯 Агент отказал без поиска — форсирую search_products")
             soobshcheniya.append({"role": "system", "content":
                                   "Ты не проверила прайс. Обязательно вызови search_products "
@@ -845,13 +869,29 @@ async def otvetit(cfg: OpenRouterConfig, poisk: Poisk | None, istoriya: list[dic
         if (poisk is not None and not zaprosy_poiska and not forsirovano
                 and _zadala_vopros(otvet) and not _boltovnya(tekst_klienta)):
             forsirovano = True
-            forsim_seychas = True
+            chem_forsirovat = FORSIROVAT_POISK
             logger.warning("🧯 Агент уточняет без поиска — форсирую search_products")
             soobshcheniya.append({"role": "system", "content":
                                   "Не спрашивай покупателя, не заглянув в прайс. Вызови "
                                   "search_products по товару из его вопроса и уточняй "
                                   "ТОЛЬКО по тем видам, сортам и длинам, которые реально "
                                   "есть в выдаче."})
+            continue
+
+        # ПРЕДОХРАНИТЕЛЬ ЧЕТВЁРТЫЙ: клиент оставил номер, а модель ответила «записал»
+        # словами, не вызвав save_lead — лид утёк бы (ни контакта, ни задачи в amoCRM).
+        # Живой баг 22.09 (sbsauna, Антон дал 895…598): бот сказал «Спасибо, записал»,
+        # но инструмент не дёрнул. Не гарантируется промптом — форсируем save_lead.
+        # Не зависит от `poisk`: INSTRUMENT_LEAD есть у всех, включая услуги.
+        if (not lead_peredan and not forsirovan_lead and _dal_telefon(tekst_klienta)):
+            forsirovan_lead = True
+            chem_forsirovat = FORSIROVAT_LEAD
+            logger.warning("🧯 Клиент дал номер, а save_lead не вызван — форсирую save_lead")
+            soobshcheniya.append({"role": "system", "content":
+                                  "Клиент оставил номер телефона. ОБЯЗАТЕЛЬНО вызови "
+                                  "save_lead с этим номером и краткой выжимкой диалога — "
+                                  "иначе контакт не дойдёт до менеджера. Ответить «записал» "
+                                  "словами без вызова инструмента НЕЛЬЗЯ."})
             continue
 
         otvet = ochistit_otvet(otvet)
@@ -877,6 +917,7 @@ async def otvetit(cfg: OpenRouterConfig, poisk: Poisk | None, istoriya: list[dic
                       {"role": "assistant", "content": otvet}],
             zaprosy_poiska=zaprosy_poiska, naydeno=naydeno,
             forsirovan_poisk=forsirovano, lead_peredan=lead_peredan,
+            forsirovan_lead=forsirovan_lead,
         )
 
     logger.warning("Агент исчерпал лимит итераций (%d)", ITERACIY)
@@ -887,7 +928,7 @@ async def otvetit(cfg: OpenRouterConfig, poisk: Poisk | None, istoriya: list[dic
                   {"role": "user", "content": tekst_klienta},
                   {"role": "assistant", "content": otvet}],
         zaprosy_poiska=zaprosy_poiska, naydeno=naydeno, forsirovan_poisk=forsirovano,
-        lead_peredan=lead_peredan,
+        lead_peredan=lead_peredan, forsirovan_lead=forsirovan_lead,
     )
 
 

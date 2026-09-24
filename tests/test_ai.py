@@ -549,6 +549,80 @@ async def test_lead_zaglushka_bez_cifr_ne_uhodit(poisk, cfg, monkeypatch):
     assert r.lead_peredan is False
 
 
+def test_dal_telefon_ловит_номер_и_не_ловит_размеры():
+    assert agent._dal_telefon("89511794598")
+    assert agent._dal_telefon("мой номер 8 918 431-17-46")
+    assert agent._dal_telefon("вот +7 (900) 123-45-67 звоните")
+    # Размеры парной — цифры разбросаны, буквами/запятыми прогон рвётся:
+    assert not agent._dal_telefon("парная 3 на 2,3 метра, высота потолка 2,8")
+    assert not agent._dal_telefon("нужно 108 штук вагонки")
+    assert not agent._dal_telefon("перезвоните мне")
+
+
+@pytest.mark.asyncio
+async def test_dal_nomer_no_model_ne_pozvala_save_lead_forsiruet(poisk, cfg, monkeypatch):
+    """Живой баг 22.09 (sbsauna, Антон дал 89511794598): бот ответил «Спасибо,
+    записал» словами, но save_lead не вызвал — лид утёк (ни контакта, ни задачи
+    в amoCRM). Предохранитель форсирует именно save_lead и лид доходит."""
+    fake = FakeChat([
+        {"content": "Спасибо, записал. Жду ваших замеров.", "tool_calls": None},
+        _vyzov_lida("89511794598", vyzhimka="Отделка бани под ключ, вернётся с замерами"),
+        {"content": "Спасибо, передал менеджеру.", "tool_calls": None},
+    ])
+    monkeypatch.setattr(agent, "chat", fake)
+    peredannye = []
+
+    async def peredat(telefon, imya, vyzhimka, tema=None):
+        peredannye.append(telefon)
+
+    r = await agent.otvetit(cfg, poisk, [], "89511794598", peredat_lead=peredat)
+    assert r.forsirovan_lead
+    assert r.lead_peredan
+    assert peredannye == ["89511794598"]
+    # Форсируем ИМЕННО лид, а не «любой инструмент».
+    assert fake.vyzovy == ["auto", agent.FORSIROVAT_LEAD, "auto"]
+
+
+@pytest.mark.asyncio
+async def test_razmery_ne_forsiruyut_lead(poisk, cfg, monkeypatch):
+    """Сообщение с размерами (цифры есть, но это не номер) не должно форсировать
+    save_lead — иначе бот приставал бы за телефон на каждый габарит."""
+    fake = FakeChat([_tool_call("вагонка липа"),
+                     {"content": "Записал размеры, подберу материал.", "tool_calls": None}])
+    monkeypatch.setattr(agent, "chat", fake)
+    peredannye = []
+
+    async def peredat(telefon, imya, vyzhimka, tema=None):
+        peredannye.append(telefon)
+
+    r = await agent.otvetit(cfg, poisk, [], "парная 3 на 2,3 метра, высота 2,8",
+                            peredat_lead=peredat)
+    assert not r.forsirovan_lead
+    assert peredannye == []
+    assert agent.FORSIROVAT_LEAD not in fake.vyzovy
+
+
+@pytest.mark.asyncio
+async def test_lead_forsiruetsya_i_bez_poiska_uslugi(cfg, monkeypatch):
+    """Аккаунт услуг (poisk=None): прайса нет, но save_lead есть — номер клиента
+    обязан дойти до менеджера так же, как у товарного."""
+    fake = FakeChat([
+        {"content": "Спасибо, записал.", "tool_calls": None},
+        _vyzov_lida("89295392098", vyzhimka="Отделка бани, Сочи Хоста"),
+        {"content": "Передал менеджеру, свяжемся.", "tool_calls": None},
+    ])
+    monkeypatch.setattr(agent, "chat", fake)
+    peredannye = []
+
+    async def peredat(telefon, imya, vyzhimka, tema=None):
+        peredannye.append(telefon)
+
+    r = await agent.otvetit(cfg, None, [], "89295392098",
+                            sistemny="Ты Роман из SB SAUNA.", peredat_lead=peredat)
+    assert r.forsirovan_lead
+    assert peredannye == ["89295392098"]
+
+
 @pytest.mark.asyncio
 async def test_padenie_bd_ne_royaet_dialog(poisk, cfg, monkeypatch):
     """Лид дороже всего, но оборвать из-за него живой диалог — хуже: клиент
