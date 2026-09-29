@@ -209,6 +209,7 @@ class Vhodyashchee:
     obyavlenie: dict | None           # context.value: {id,title,price_string,url,...}
     vlozhenie: dict | None = None     # {tip, url, imya, razmer} — фото/файл клиента (14.9)
     imya_klienta: str | None = None   # реальное имя клиента из чата (users), для amoCRM
+    created: int | None = None        # unix-время сообщения (для гейта свежести, баг 4)
 
 
 def _krupneyshaya_kartinka(sizes: dict) -> str | None:
@@ -313,6 +314,7 @@ def _vhodyashchee_iz_soobshcheniya(chat_id: str, msg: dict,
         obyavlenie=obyavlenie,
         vlozhenie=_izvlech_vlozhenie(msg),
         imya_klienta=imya_klienta,
+        created=msg.get("created"),
     )
 
 
@@ -492,16 +494,29 @@ def _telefon_iz_teksta(tekst: str | None) -> str | None:
     return None
 
 
+#: Не заводим контакт по СТАРОМУ сообщению с номером. Клиент оставляет номер под
+#: менеджером в реальном времени — обрабатываем за секунды. Гейт нужен, чтобы на
+#: старте/после рестарта проход-зеркало не завёл ретроспективно контакты по всей
+#: истории чатов (поймано на выкате 29.09: пустой журнал → всплеск по бэклогу).
+SVEZHEST_NOMERA_S = 3600.0
+
+
 async def _zavesti_kontakt_menedzhera(zavesti_lead, operatory, kod: str, chat_id: str,
                                       v: "Vhodyashchee") -> None:
     """Клиент оставил номер, пока чат ведёт менеджер (бот молчит) → завести контакт
     в amoCRM (баг 4). Дедуп по журналу `Operatory.lead_zaveden` (Redis, переживает
     рестарт): ровно один контакт+задача на сообщение с номером, а не на каждый тик.
+    Старые сообщения (> `SVEZHEST_NOMERA_S`) пропускаем — только свежий номер.
 
     `zavesti_lead(kod, chat, telefon, imya)` — колбэк ядра (`Yadro.
     zavesti_kontakt_pri_perehvate`). Нет колбэка (тесты/без amoCRM) → выходим.
     Сбой заведения не роняет обработку — логируем и молчим (как зеркало/лид)."""
     if zavesti_lead is None or not v.tekst:
+        return
+    # Гейт свежести: исторический номер (известное старое `created`) не заводим —
+    # иначе первый проход по всей истории плодит задачи по давно закрытым диалогам.
+    # Нет `created` (фолбэк last_message) → считаем свежим (обычный новый входящий).
+    if v.created and (time.time() - float(v.created)) > SVEZHEST_NOMERA_S:
         return
     telefon = _telefon_iz_teksta(v.tekst)
     if not telefon:

@@ -929,6 +929,27 @@ async def test_nomer_pod_menedzherom_zavoditsya_odin_raz():
     assert calls == [("sbsauna", "c1", "89034502777", "Роман")]  # контакт заведён РОВНО раз
 
 
+async def test_staryy_nomer_pod_menedzherom_ne_zavoditsya():
+    # Гейт свежести: исторический номер (старое created) НЕ заводим — иначе первый
+    # проход по истории плодит задачи по давно закрытым диалогам (выкат 29.09).
+    import time as _t
+    calls = []
+
+    async def zavesti(kod, chat, tel, imya):
+        calls.append(tel)
+
+    ya, api, zer = _FakeYadro(), _FakeAPI(), _FakeZerkalo()
+    op = Operatory(redis=None)
+    await op.vzyal("sbsauna", "c1")
+    obr = sdelat_obrabotchik("sbsauna", api, ya, None, zerkalo=zer,
+                             operatory=op, zavesti_lead=zavesti)
+    v = Vhodyashchee(chat_id="c1", msg_id="m1", author_id=42,
+                     tekst="мой номер 89034502777", obyavlenie=None,
+                     created=int(_t.time()) - 7200)   # 2 часа назад — старое
+    await obr(v)
+    assert calls == []                       # старый номер не заводим
+
+
 async def test_bez_nomera_pod_menedzherom_ne_zavodit():
     calls = []
 
