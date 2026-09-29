@@ -29,8 +29,8 @@ from ..search.katalog import Katalog
 from ..search.search import Nahodka, Poisk, cena_za_metr_kvadratnyy
 from ..search.slovari import slovari
 from .openrouter import chat
-from .stil import (est_proshba_telefona, ochistit_otvet, snyat_privetstvie,
-                   snyat_proshbu_telefona)
+from .stil import (est_proshba_telefona, ochistit_otvet, snyat_lozhnoe_podtverzhdenie,
+                   snyat_privetstvie, snyat_proshbu_telefona)
 from ..znaniya_tovar import (BLOKI_SAUNAMART, SISTEMNY_SHABLON,
                              podstavit_bloki)
 
@@ -910,6 +910,13 @@ async def otvetit(cfg: OpenRouterConfig, poisk: Poisk | None, istoriya: list[dic
             if vyrezano:
                 logger.warning("🧯 Агент просил телефон сверх лимита (%d) — вырезал: %s",
                                LIMIT_PROSB_KONTAKTA, vyrezano)
+        # ПРЕДОХРАНИТЕЛЬ: ложное «записала ваш номер», когда номера не было. Лид не
+        # передан и клиент в этом ходу номер не давал — значит подтверждать приём
+        # номера нельзя (баг 29.09: «Напишите сюда» → «Спасибо, записала ваш номер»).
+        if not lead_peredan and not _dal_telefon(tekst_klienta):
+            otvet, lozhnoe = snyat_lozhnoe_podtverzhdenie(otvet)
+            if lozhnoe:
+                logger.warning("🧯 Ложное подтверждение номера без лида — вырезал: %s", lozhnoe)
         return OtvetAgenta(
             otvet=otvet,
             istoriya=[*istoriya,

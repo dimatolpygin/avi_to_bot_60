@@ -780,6 +780,37 @@ def test_proshba_telefona_ne_lovit_lishnego(tekst):
     assert snyat_proshbu_telefona(tekst) == (tekst, None)
 
 
+def test_lozhnoe_podtverzhdenie_nomera_vyrezaetsya():
+    """Баг 29.09: «Напишите сюда» → «Спасибо, записала ваш номер». Номера не было —
+    ложное подтверждение приёма режем, полезный текст оставляем."""
+    from bot.ai.stil import snyat_lozhnoe_podtverzhdenie
+
+    syroy = "Спасибо, записала ваш номер. Мы свяжемся с вами по дымоходам."
+    chistyy, vyrezano = snyat_lozhnoe_podtverzhdenie(syroy)
+    assert "записала ваш номер" not in chistyy
+    assert "свяжемся" in chistyy and vyrezano
+
+
+@pytest.mark.parametrize("tekst", [
+    # Нет ложного подтверждения — не трогаем.
+    "Липа сорт А есть, 513 рублей за штуку. Какая длина нужна?",
+    "Оставьте, пожалуйста, ваш номер, и мы свяжемся.",
+])
+def test_lozhnoe_podtverzhdenie_ne_lovit_lishnego(tekst):
+    from bot.ai.stil import snyat_lozhnoe_podtverzhdenie
+
+    assert snyat_lozhnoe_podtverzhdenie(tekst) == (tekst, None)
+
+
+def test_lozhnoe_podtverzhdenie_ne_delaet_pustotu():
+    """Если кроме ложного подтверждения ничего нет — отдаём как было (пустую
+    реплику слать нельзя), вызывающий не применит при реальном номере."""
+    from bot.ai.stil import snyat_lozhnoe_podtverzhdenie
+
+    tekst = "Записала ваш номер."
+    assert snyat_lozhnoe_podtverzhdenie(tekst) == (tekst, None)
+
+
 @pytest.mark.asyncio
 async def test_pervaya_proshba_kontakta_prohodit(poisk, cfg, monkeypatch):
     """Спросить один раз НУЖНО, иначе лида не будет вовсе: клиент считает,
