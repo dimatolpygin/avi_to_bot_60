@@ -20,6 +20,7 @@ OAuth — `client_credentials`: бот сам меняет client_id/secret на
 from __future__ import annotations
 
 import asyncio
+import re
 import time
 from dataclasses import dataclass
 
@@ -207,6 +208,7 @@ class Vhodyashchee:
     tekst: str | None                 # None у картинок/голоса — текста нет
     obyavlenie: dict | None           # context.value: {id,title,price_string,url,...}
     vlozhenie: dict | None = None     # {tip, url, imya, razmer} — фото/файл клиента (14.9)
+    imya_klienta: str | None = None   # реальное имя клиента из чата (users), для amoCRM
 
 
 def _krupneyshaya_kartinka(sizes: dict) -> str | None:
@@ -247,6 +249,25 @@ def _izvlech_vlozhenie(lm: dict) -> dict | None:
     return {"tip": tip, "url": None, "imya": None, "razmer": None}
 
 
+def _imya_klienta_chata(chat: dict, nash_uid: int | None) -> str | None:
+    """Имя клиента из объекта чата: участник `users`, чей id ≠ нашему аккаунту.
+
+    Участников ровно два — мы и клиент, значит клиент = не мы. Имя реальное
+    («Роман», «Виктор», «Денис»…), в отличие от `receiver.name` «Клиент Авито»,
+    которым amojo метит контакт без имени. `author_id` в сообщениях Авито бывает 0
+    (маскируется), поэтому клиента берём по `users`, а не по author_id. Нет
+    `users`/имени → None (зеркало подставит «Клиент Авито», как раньше)."""
+    for u in chat.get("users") or []:
+        if not isinstance(u, dict):
+            continue
+        if nash_uid is not None and u.get("id") == nash_uid:
+            continue
+        imya = (u.get("name") or "").strip()
+        if imya:
+            return imya
+    return None
+
+
 def _obyavlenie_chata(chat: dict) -> dict | None:
     """Объявление, под которым идёт чат: `context.value` при `type=="item"`.
 
@@ -267,7 +288,8 @@ def _obyavlenie_vakansiya(ob: dict | None) -> bool:
 
 
 def _vhodyashchee_iz_soobshcheniya(chat_id: str, msg: dict,
-                                   obyavlenie: dict | None) -> Vhodyashchee | None:
+                                   obyavlenie: dict | None,
+                                   imya_klienta: str | None = None) -> Vhodyashchee | None:
     """Разобрать ОДНО сообщение (из `last_message` или списка сообщений) во
     `Vhodyashchee`. Исходящие (`direction != "in"`) и без id — отбрасываем."""
     if msg.get("direction") != "in":
@@ -290,18 +312,21 @@ def _vhodyashchee_iz_soobshcheniya(chat_id: str, msg: dict,
         tekst=content.get("text"),
         obyavlenie=obyavlenie,
         vlozhenie=_izvlech_vlozhenie(msg),
+        imya_klienta=imya_klienta,
     )
 
 
-def izvlech_vhodyashchee(chat: dict) -> Vhodyashchee | None:
+def izvlech_vhodyashchee(chat: dict, nash_uid: int | None = None) -> Vhodyashchee | None:
     """Достать последнее входящее из объекта чата (`last_message`).
 
     Фолбэк, когда список сообщений недоступен. Основной путь поллинга — через
     `_sobrat_vhodyashchie`, который берёт ВСЕ входящие чата (иначе залп сообщений
-    между тиками схлопывался бы к одному `last_message`, узел 14.10).
+    между тиками схлопывался бы к одному `last_message`, узел 14.10). `nash_uid` —
+    id нашего аккаунта: по нему из `users` берётся имя клиента для amoCRM.
     """
     return _vhodyashchee_iz_soobshcheniya(
-        str(chat.get("id")), chat.get("last_message") or {}, _obyavlenie_chata(chat))
+        str(chat.get("id")), chat.get("last_message") or {}, _obyavlenie_chata(chat),
+        _imya_klienta_chata(chat, nash_uid))
 
 
 async def _sobrat_vhodyashchie(api: "AvitoAPI", chat: dict) -> list[Vhodyashchee]:
@@ -314,11 +339,19 @@ async def _sobrat_vhodyashchie(api: "AvitoAPI", chat: dict) -> list[Vhodyashchee
     списком → фолбэк на `last_message`, чтобы не потерять хотя бы последнее."""
     obyavlenie = _obyavlenie_chata(chat)
     chat_id = str(chat.get("id"))
+    # Имя клиента берём из объекта чата один раз (в сообщениях его нет) и вешаем на
+    # каждое входящее — с ним контакт в amoCRM создаётся с реальным именем, а не
+    # «Клиент Авито» (жалоба заказчика 24.09). uid нужен, чтобы отличить нас от клиента.
+    try:
+        nash_uid = await api.user_id()
+    except Exception:  # noqa: BLE001 — без uid просто не подставим имя (не критично)
+        nash_uid = None
+    imya_klienta = _imya_klienta_chata(chat, nash_uid)
     try:
         msgs = await api.soobshcheniya(chat_id)
     except Exception as e:  # noqa: BLE001 — не смогли список → хотя бы last_message
         log_oshibka(f"Поллинг Авито: список сообщений чата {chat_id}: {e}")
-        v = izvlech_vhodyashchee(chat)
+        v = izvlech_vhodyashchee(chat, nash_uid)
         return [v] if v is not None else []
     # Порядок выдачи Авито не гарантирован; сортируем по времени, старые первыми.
     # `created` — секунды, у залпа фото совпадает: reverse перед устойчивой
@@ -327,10 +360,11 @@ async def _sobrat_vhodyashchie(api: "AvitoAPI", chat: dict) -> list[Vhodyashchee
     poryadok = sorted((m for m in reversed(msgs) if isinstance(m, dict)),
                       key=lambda m: m.get("created") or 0)
     vhod = [v for m in poryadok
-            if (v := _vhodyashchee_iz_soobshcheniya(chat_id, m, obyavlenie)) is not None]
+            if (v := _vhodyashchee_iz_soobshcheniya(
+                chat_id, m, obyavlenie, imya_klienta)) is not None]
     if vhod:
         return vhod
-    v = izvlech_vhodyashchee(chat)          # список без входящих — пробуем last_message
+    v = izvlech_vhodyashchee(chat, nash_uid)  # список без входящих — пробуем last_message
     return [v] if v is not None else []
 
 
@@ -443,6 +477,48 @@ async def zapustit_nablyudenie(cfg: AvitoConfig, stop: asyncio.Event) -> None:
 
 # ── Режим ответа через ядро (подэтап 14.2) ───────────────────────────────────
 
+# Телефон в тексте клиента (баг 4): непрерывный прогон 10–11 цифр (моб. РФ), допускаем
+# пробелы/скобки/дефисы между ними. Габариты парной («3 на 4», «40 60») сюда не попадают —
+# в них нет 10+ цифр подряд. Тот же критерий, что у `_dal_telefon` в ИИ-слое.
+_RE_TELEFON = re.compile(r"\+?\d[\d\s()\-]{8,}\d")
+
+
+def _telefon_iz_teksta(tekst: str | None) -> str | None:
+    """Первый телефон (10–11 цифр) из текста клиента или None. Возвращаем как есть
+    (нормализацию сделает amoCRM)."""
+    for kandidat in _RE_TELEFON.findall(tekst or ""):
+        if 10 <= sum(c.isdigit() for c in kandidat) <= 11:
+            return kandidat.strip()
+    return None
+
+
+async def _zavesti_kontakt_menedzhera(zavesti_lead, operatory, kod: str, chat_id: str,
+                                      v: "Vhodyashchee") -> None:
+    """Клиент оставил номер, пока чат ведёт менеджер (бот молчит) → завести контакт
+    в amoCRM (баг 4). Дедуп по журналу `Operatory.lead_zaveden` (Redis, переживает
+    рестарт): ровно один контакт+задача на сообщение с номером, а не на каждый тик.
+
+    `zavesti_lead(kod, chat, telefon, imya)` — колбэк ядра (`Yadro.
+    zavesti_kontakt_pri_perehvate`). Нет колбэка (тесты/без amoCRM) → выходим.
+    Сбой заведения не роняет обработку — логируем и молчим (как зеркало/лид)."""
+    if zavesti_lead is None or not v.tekst:
+        return
+    telefon = _telefon_iz_teksta(v.tekst)
+    if not telefon:
+        return
+    if operatory is not None and await operatory.lead_zaveden(kod, chat_id, v.msg_id):
+        return
+    try:
+        await zavesti_lead(kod, chat_id, telefon, v.imya_klienta)
+    except Exception as e:  # noqa: BLE001 — заведение контакта не роняет обработку
+        log_oshibka(f"Контакт под менеджером ({kod}:{chat_id}): {e}")
+        return
+    if operatory is not None:
+        await operatory.zapomnit_lead_zaveden(kod, chat_id, v.msg_id)
+    logger.info("📇 Авито «%s»: клиент оставил номер под менеджером в чате %s — "
+                "завёл контакт в amoCRM", kod, chat_id)
+
+
 def _kanal_avito(api: AvitoAPI, chat_id: str, imya: str, *,
                  zerkalo=None, avtor_id=None, zhurnal=None,
                  operatory=None, kod: str | None = None) -> Kanal:
@@ -456,6 +532,16 @@ def _kanal_avito(api: AvitoAPI, chat_id: str, imya: str, *,
     ответ бота от ответа живого менеджера при детекции перехвата.
     """
     async def otpravit(tekst: str) -> None:
+        # Гонка «менеджер перехватил, пока бот думал» (жалоба заказчика 24.09 —
+        # «бот после моих ответов отвечает дублем»): реплика модели генерится ~25 c
+        # (этап 9), и если за это время менеджер ответил в amoCRM (вебхук ставит флаг
+        # Operatory) или в Авито, отложенную реплику бота слать НЕЛЬЗЯ — она ляжет
+        # дублем поверх ответа менеджера. Проверяем перехват ПРЯМО перед отправкой,
+        # а не только на входящем. У обычного чата (перехвата нет) — дешёвый no-op.
+        if operatory is not None and kod is not None and await operatory.vedet(kod, chat_id):
+            logger.info("🙋 Авито «%s»: чат %s перехвачен оператором, пока бот готовил "
+                        "ответ — реплику не шлю (гонка)", kod, chat_id)
+            return
         rezultat = await api.otpravit(chat_id, tekst)
         if operatory is not None and kod is not None:
             await operatory.zapomnit_otpravlennoe(
@@ -487,7 +573,7 @@ def _marker_vlozheniya(vlozhenie: dict | None) -> str:
 
 async def zapustit(kod: str, cfg: AvitoConfig, yadro, stop: asyncio.Event, *,
                    belyy_spisok: frozenset[str] | None = None, zerkalo=None,
-                   zhurnal=None, operatory=None) -> None:
+                   zhurnal=None, operatory=None, zavesti_lead=None) -> None:
     """Поллер в режиме ответа: входящее уходит в ядро, ответ шлётся в Авито.
 
     `belyy_spisok` — множество `chat_id`, которым РАЗРЕШЕНО отвечать. `None`
@@ -508,14 +594,15 @@ async def zapustit(kod: str, cfg: AvitoConfig, yadro, stop: asyncio.Event, *,
                     ", перехват оператором" if operatory is not None else "")
         obrabotchik = sdelat_obrabotchik(kod, api, yadro, belyy_spisok,
                                          zerkalo=zerkalo, zhurnal=zhurnal,
-                                         operatory=operatory)
+                                         operatory=operatory, zavesti_lead=zavesti_lead)
         zadachi = [cikl_pollinga(api, obrabotchik, stop)]
         # Проход зеркалирования (14.13): ловит чаты, которые менеджер прочитал/ведёт
         # в приложении Авито (unread снят) — их основной поллер не видит. Только
         # зеркалит, не отвечает; нужен и зеркало, и журнал оператора для дедупа.
         if zerkalo is not None and operatory is not None:
             zadachi.append(cikl_zerkalirovaniya(
-                api, kod, zerkalo, operatory, stop, belyy_spisok=belyy_spisok))
+                api, kod, zerkalo, operatory, stop, belyy_spisok=belyy_spisok,
+                zavesti_lead=zavesti_lead))
             logger.info("🪞 Авито «%s»: включён проход зеркалирования (14.13, "
                         "интервал %.0f c)", kod, INTERVAL_ZERKALIROVANIYA_S)
         await asyncio.gather(*zadachi)
@@ -565,7 +652,8 @@ def _avtor_chata(msgs: list[dict]) -> int | None:
 
 
 async def _zerkalit_vhodyashchie_svip(zerkalo, operatory, kod: str, chat_id: str,
-                                      msgs: list[dict]) -> None:
+                                      msgs: list[dict],
+                                      imya_klienta: str | None = None) -> None:
     """Досылать в amoCRM входящие клиента, которых там ещё нет (проход 14.13).
 
     Идём по входящим окна в хронологии; msg_id, уже помеченный зеркалированным
@@ -586,10 +674,11 @@ async def _zerkalit_vhodyashchie_svip(zerkalo, operatory, kod: str, chat_id: str
         if await operatory.vhodyashchee_zerkalen(kod, chat_id, v.msg_id):
             continue
         if v.tekst:
-            ok = await zerkalo.vhodyashchee(chat_id, v.msg_id, v.author_id, v.tekst)
+            ok = await zerkalo.vhodyashchee(chat_id, v.msg_id, v.author_id, v.tekst,
+                                            imya=imya_klienta)
         elif v.vlozhenie and v.vlozhenie.get("url"):
             ok = await zerkalo.vhodyashchee_vlozhenie(
-                chat_id, v.msg_id, v.author_id, v.vlozhenie)
+                chat_id, v.msg_id, v.author_id, v.vlozhenie, imya=imya_klienta)
         else:
             continue                       # нечего зеркалить (пустой текст / вложение без url)
         if ok:
@@ -597,9 +686,28 @@ async def _zerkalit_vhodyashchie_svip(zerkalo, operatory, kod: str, chat_id: str
             logger.info("📤 amoCRM ← клиент (чат %s): досыл зеркала проходом 14.13", chat_id)
 
 
+async def _zabrat_nomera_pod_menedzherom(zavesti_lead, operatory, kod: str,
+                                         chat_id: str, msgs: list[dict],
+                                         imya_klienta: str | None) -> None:
+    """Проход-зеркало: досмотреть входящие чата, что ведёт менеджер, и завести в
+    amoCRM контакт по каждому непрокинутому номеру (баг 4).
+
+    Нужно для случая, когда менеджер работает прямо в приложении Авито (чат
+    прочитан → основной поллер его не видит, `obrabotchik` не сработал). Дедуп —
+    в `_zavesti_kontakt_menedzhera` по журналу `lead_zaveden`, поэтому пересечение
+    с `obrabotchik` не плодит задачи."""
+    for m in msgs:
+        if not isinstance(m, dict):
+            continue
+        v = _vhodyashchee_iz_soobshcheniya(chat_id, m, None, imya_klienta)
+        if v is not None and v.tekst:
+            await _zavesti_kontakt_menedzhera(zavesti_lead, operatory, kod, chat_id, v)
+
+
 async def cikl_zerkalirovaniya(api: AvitoAPI, kod: str, zerkalo, operatory,
                                stop: asyncio.Event, *,
                                belyy_spisok: frozenset[str] | None = None,
+                               zavesti_lead=None,
                                interval_s: float = INTERVAL_ZERKALIROVANIYA_S,
                                limit_chatov: int = LIMIT_CHATOV_ZERKALA) -> None:
     """Проход зеркалирования по ВСЕМ недавним чатам, не только непрочитанным (14.13).
@@ -623,6 +731,10 @@ async def cikl_zerkalirovaniya(api: AvitoAPI, kod: str, zerkalo, operatory,
     """
     while not stop.is_set():
         try:
+            try:
+                nash_uid = await api.user_id()
+            except Exception:  # noqa: BLE001 — без uid просто не подставим имя клиента
+                nash_uid = None
             for chat in await api.chaty(tolko_neprochitannye=False, limit=limit_chatov):
                 chat_id = str(chat.get("id"))
                 if belyy_spisok is not None and chat_id not in belyy_spisok:
@@ -631,12 +743,20 @@ async def cikl_zerkalirovaniya(api: AvitoAPI, kod: str, zerkalo, operatory,
                 # такой чат в воронку не тянем (ни входящие, ни ответы менеджера).
                 if _obyavlenie_vakansiya(_obyavlenie_chata(chat)):
                     continue
+                imya_klienta = _imya_klienta_chata(chat, nash_uid)
                 try:
                     msgs = await api.soobshcheniya(chat_id)
                 except Exception as e:  # noqa: BLE001 — один чат не роняет проход
                     log_oshibka(f"Зеркало-проход: окно чата {chat_id}: {e}")
                     continue
-                await _zerkalit_vhodyashchie_svip(zerkalo, operatory, kod, chat_id, msgs)
+                await _zerkalit_vhodyashchie_svip(zerkalo, operatory, kod, chat_id, msgs,
+                                                  imya_klienta)
+                # Чат ведёт менеджер и клиент оставил номер прямо в Авито (основной
+                # поллер этот чат уже не видит — он прочитан) → заводим контакт в
+                # amoCRM (баг 4). Дедуп по журналу, пересечение с obrabotchik не дублит.
+                if zavesti_lead is not None and await operatory.vedet(kod, chat_id):
+                    await _zabrat_nomera_pod_menedzherom(
+                        zavesti_lead, operatory, kod, chat_id, msgs, imya_klienta)
                 # Ручные ответы менеджера — только когда бот в чате уже отметился
                 # (иначе холодный старт залил бы историю, см. `_zerkalit_operatora`).
                 if await operatory.aktiven(kod, chat_id):
@@ -699,7 +819,7 @@ async def _operator_perehvatil(operatory, kod: str, api: AvitoAPI,
 
 def sdelat_obrabotchik(kod: str, api: AvitoAPI, yadro,
                        belyy_spisok: frozenset[str] | None, *, zerkalo=None,
-                       zhurnal=None, operatory=None):
+                       zhurnal=None, operatory=None, zavesti_lead=None):
     """Обработчик входящего в режиме ответа: белый список → вложение → перехват → ядро.
 
     Вынесен из `zapustit`, чтобы фильтр белого списка, передачу объявления,
@@ -756,7 +876,8 @@ def sdelat_obrabotchik(kod: str, api: AvitoAPI, yadro,
             # прочитать картинку бот не может, ядру передавать нечего.
             if zerkalo is not None and v.vlozhenie:
                 ok = await zerkalo.vhodyashchee_vlozhenie(
-                    v.chat_id, v.msg_id, v.author_id, v.vlozhenie, imya=imya)
+                    v.chat_id, v.msg_id, v.author_id, v.vlozhenie,
+                    imya=v.imya_klienta or imya)
                 if ok and operatory is not None:
                     await operatory.zapomnit_vhodyashchee_zerkalirovannoe(
                         kod, v.chat_id, v.msg_id)
@@ -818,7 +939,8 @@ def sdelat_obrabotchik(kod: str, api: AvitoAPI, yadro,
         if zerkalo is not None:
             # Метим входящее зеркалированным ТОЛЬКО при успехе — тогда проход
             # 14.13 его не досылает, а сбойное (ok=False) досылает на своём тике.
-            ok = await zerkalo.vhodyashchee(v.chat_id, v.msg_id, v.author_id, v.tekst)
+            ok = await zerkalo.vhodyashchee(v.chat_id, v.msg_id, v.author_id, v.tekst,
+                                            imya=v.imya_klienta)
             if ok and operatory is not None:
                 await operatory.zapomnit_vhodyashchee_zerkalirovannoe(
                     kod, v.chat_id, v.msg_id)
@@ -828,11 +950,16 @@ def sdelat_obrabotchik(kod: str, api: AvitoAPI, yadro,
         # клиента уже зеркалирован и в журнале — менеджер его увидит в панели и amo.
         if operatory is not None and await _operator_perehvatil(
                 operatory, kod, api, v.chat_id, msgs=msgs):
+            # Бот молчит под менеджером, но если клиент оставил номер — заводим
+            # контакт в amoCRM (баг 4): иначе номер осядет только в переписке.
+            await _zavesti_kontakt_menedzhera(zavesti_lead, operatory, kod, v.chat_id, v)
             return
         # Рубильник (запрос заказчика 19.08): аккаунт заглушён с листа-пульта —
         # входящее уже зеркалено в amoCRM и в журнале (выше), но ядро не зовём и не
         # отвечаем. Клиент продолжает переписку, менеджер видит её в карточке.
         if not yadro.otvechaet(kod):
+            # Аккаунт заглушён рубильником, но номер клиента всё равно заводим (баг 4).
+            await _zavesti_kontakt_menedzhera(zavesti_lead, operatory, kod, v.chat_id, v)
             logger.info("🔌 Авито «%s»: чат %s — бот выключен рубильником, молчу "
                         "(входящее в amoCRM ушло)", kod, v.chat_id)
             return

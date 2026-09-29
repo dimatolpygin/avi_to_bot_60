@@ -402,6 +402,22 @@ class Yadro:
                     tema=tema))
         return peredat
 
+    async def zavesti_kontakt_pri_perehvate(self, kod: str, chat: str | int,
+                                            telefon: str, imya: str | None = None) -> None:
+        """Клиент оставил номер, пока чат ведёт менеджер (бот молчит) — завести
+        контакт в amoCRM всё равно (баг 4).
+
+        Под перехватом оператором (14.8) бот не зовёт модель, поэтому её `save_lead`
+        не срабатывает, и номер клиента оседает только в переписке карточки, а в
+        сделку/контакт/задачу не попадает. Зовёт адаптер Авито, когда во входящем
+        под менеджером есть телефон. Идёт через тот же пайплайн, что `save_lead`
+        (БД → в фоне amoCRM): существующую сделку чата не дублируем — `otpravit_lead`
+        находит её по conv-UUID, дописывает телефон контакту и ставит задачу.
+        """
+        peredat = self._peredat_lead(kod, Dispetcher.klyuch(kod, chat))
+        await peredat(telefon, imya,
+                      "Клиент оставил номер в чате Авито (диалог ведёт менеджер).", None)
+
     def _peredat_dialog(self, kod: str, klyuch: str):
         """Куда уходит ГОРЯЧИЙ диалог, когда клиент созрел, но телефона не оставил (14.11).
 

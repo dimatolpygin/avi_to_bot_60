@@ -12,7 +12,9 @@ import httpx
 import pytest
 
 from bot.channels.avito import (AvitoAPI, OshibkaAvito, Vidennye, Vhodyashchee,
-                                 _sobrat_vhodyashchie, _zerkalit_vhodyashchie_svip,
+                                 _imya_klienta_chata, _kanal_avito,
+                                 _sobrat_vhodyashchie, _telefon_iz_teksta,
+                                 _zerkalit_vhodyashchie_svip,
                                  cikl_pollinga, cikl_zerkalirovaniya,
                                  izvlech_vhodyashchee, posledny_vhodyashchiy,
                                  sdelat_obrabotchik)
@@ -596,8 +598,8 @@ class _FakeZerkalo:
         self.vhod = []
         self.vhod_vlozh = []
 
-    async def vhodyashchee(self, chat_id, msg_id, author_id, tekst):
-        self.vhod.append((chat_id, tekst))
+    async def vhodyashchee(self, chat_id, msg_id, author_id, tekst, *, imya=None):
+        self.vhod.append((chat_id, tekst, imya))
 
     async def vhodyashchee_vlozhenie(self, chat_id, msg_id, author_id, vlozhenie, *, imya=None):
         self.vhod_vlozh.append((chat_id, vlozhenie))
@@ -615,7 +617,7 @@ async def test_rubilnik_vykl_tekst_zerkalit_no_ne_otvechaet():
 
     assert ya.obrabotano == []                          # ядро не зван — бот молчит
     assert api.otpravleno == []                         # клиенту ничего не ушло
-    assert zer.vhod == [("c1", "какой адрес офиса?")]   # но в amoCRM входящее ушло
+    assert zer.vhod == [("c1", "какой адрес офиса?", None)]   # но в amoCRM входящее ушло
 
 
 async def test_rubilnik_vkl_otvechaet_kak_obychno():
@@ -846,3 +848,99 @@ async def test_svip_propuskaet_vakansiyu():
     await _odin_tik_zerkala(api, zer, op)
 
     assert zer.vhod == []                                  # вакансия — не в воронку
+
+
+# ── Имя клиента из чата → в amoCRM (баг 1, 29.09) ────────────────────────────
+
+def test_imya_klienta_iz_chata_beret_ne_nas():
+    chat = {"users": [{"id": 23598618, "name": "Все для отделки бани"},
+                      {"id": 42, "name": "Роман"}]}
+    assert _imya_klienta_chata(chat, 23598618) == "Роман"
+
+
+def test_imya_klienta_net_kogda_tolko_my():
+    assert _imya_klienta_chata({"users": [{"id": 23598618, "name": "мы"}]}, 23598618) is None
+    assert _imya_klienta_chata({}, 23598618) is None
+
+
+def test_izvlech_neset_imya_klienta_iz_users():
+    chat = _chat_vhod()
+    chat["users"] = [{"id": 23598618, "name": "магазин"}, {"id": 42, "name": "Виктор"}]
+    v = izvlech_vhodyashchee(chat, 23598618)
+    assert v.imya_klienta == "Виктор"
+
+
+async def test_obrabotchik_peredaet_imya_klienta_v_amo():
+    # Реальное имя из чата уходит в зеркало → контакт amoCRM НЕ «Клиент Авито».
+    ya, api, zer = _FakeYadro(), _FakeAPI(), _FakeZerkalo()
+    obr = sdelat_obrabotchik("sbsauna", api, ya, None, zerkalo=zer)
+    v = Vhodyashchee(chat_id="c1", msg_id="m1", author_id=42, tekst="привет",
+                     obyavlenie=None, imya_klienta="Роман")
+    await obr(v)
+    assert zer.vhod == [("c1", "привет", "Роман")]
+
+
+# ── Гонка «менеджер перехватил, пока бот думал» (баг 3, дубль) ────────────────
+
+async def test_kanal_ne_shlet_repliku_pri_perehvate():
+    op = Operatory(redis=None)
+    await op.vzyal("sbsauna", "c1")          # менеджер перехватил, пока бот генерил
+    api = _FakeAPI()
+    kanal = _kanal_avito(api, "c1", "имя", operatory=op, kod="sbsauna")
+    await kanal.otpravit("отложенный ответ бота")
+    assert api.otpravleno == []              # дубль поверх менеджера НЕ ушёл
+
+
+async def test_kanal_shlet_kogda_perehvata_net():
+    op = Operatory(redis=None)
+    api = _FakeAPI()
+    kanal = _kanal_avito(api, "c1", "имя", operatory=op, kod="sbsauna")
+    await kanal.otpravit("обычный ответ")
+    assert api.otpravleno == [("c1", "обычный ответ")]
+
+
+# ── Номер клиента под менеджером → в amoCRM (баг 4) ──────────────────────────
+
+def test_telefon_iz_teksta_lovit_nomer_ne_gabarity():
+    assert _telefon_iz_teksta("звоните 89034502777") == "89034502777"
+    assert _telefon_iz_teksta("мой +7 903 450 27 77 тел") == "+7 903 450 27 77"
+    assert _telefon_iz_teksta("парная 3 на 4, потолок 2.5") is None
+    assert _telefon_iz_teksta("нужно окно 40 на 60") is None
+    assert _telefon_iz_teksta(None) is None
+
+
+async def test_nomer_pod_menedzherom_zavoditsya_odin_raz():
+    calls = []
+
+    async def zavesti(kod, chat, tel, imya):
+        calls.append((kod, chat, tel, imya))
+
+    ya, api, zer = _FakeYadro(), _FakeAPI(), _FakeZerkalo()
+    op = Operatory(redis=None)
+    await op.vzyal("sbsauna", "c1")          # чат ведёт менеджер, бот молчит
+    obr = sdelat_obrabotchik("sbsauna", api, ya, None, zerkalo=zer,
+                             operatory=op, zavesti_lead=zavesti)
+    v = Vhodyashchee(chat_id="c1", msg_id="m1", author_id=42,
+                     tekst="мой номер 89034502777", obyavlenie=None, imya_klienta="Роман")
+    await obr(v)
+    await obr(v)                             # повтор того же msg — дедуп по журналу
+
+    assert ya.obrabotano == []               # бот под менеджером молчит
+    assert calls == [("sbsauna", "c1", "89034502777", "Роман")]  # контакт заведён РОВНО раз
+
+
+async def test_bez_nomera_pod_menedzherom_ne_zavodit():
+    calls = []
+
+    async def zavesti(kod, chat, tel, imya):
+        calls.append(tel)
+
+    ya, api, zer = _FakeYadro(), _FakeAPI(), _FakeZerkalo()
+    op = Operatory(redis=None)
+    await op.vzyal("sbsauna", "c1")
+    obr = sdelat_obrabotchik("sbsauna", api, ya, None, zerkalo=zer,
+                             operatory=op, zavesti_lead=zavesti)
+    v = Vhodyashchee(chat_id="c1", msg_id="m1", author_id=42,
+                     tekst="а когда приедете на замер?", obyavlenie=None)
+    await obr(v)
+    assert calls == []                       # номера нет — контакт не заводим

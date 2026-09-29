@@ -33,6 +33,7 @@ _PREFIKS_FLAG = "sbavito:operator"       # :{kod}:{chat} → "1", пока ве�
 _PREFIKS_BOT = "sbavito:botmsg"          # :{kod}:{chat} → список id реплик бота
 _PREFIKS_ZERK = "sbavito:opzerk"         # :{kod}:{chat} → id операторских реплик, уже в amoCRM
 _PREFIKS_VZERK = "sbavito:vhzerk"        # :{kod}:{chat} → id входящих клиента, уже в amoCRM (14.13)
+_PREFIKS_LEAD = "sbavito:leadzav"        # :{kod}:{chat} → id входящих, по которым завели контакт (баг 4)
 _HRANIT_ID = 50                          # сколько последних id реплик бота помним
 TTL_VOZVRATA_S = 3 * 24 * 3600           # 3 суток тишины → бот включается сам
 
@@ -57,6 +58,7 @@ class Operatory:
         self._otpravleno: dict[str, list[str]] = {}
         self._zerkaleno: dict[str, list[str]] = {}
         self._vh_zerkaleno: dict[str, list[str]] = {}  # 14.13: входящие, уже в amoCRM
+        self._lead_zaveden: dict[str, list[str]] = {}  # баг 4: входящие с номером, лид заведён
 
     @staticmethod
     def _kl_flag(kod, chat) -> str:
@@ -73,6 +75,10 @@ class Operatory:
     @staticmethod
     def _kl_vzerk(kod, chat) -> str:
         return f"{_PREFIKS_VZERK}:{kod}:{chat}"
+
+    @staticmethod
+    def _kl_lead(kod, chat) -> str:
+        return f"{_PREFIKS_LEAD}:{kod}:{chat}"
 
     # ── Флаг перехвата ───────────────────────────────────────────────────────
 
@@ -261,3 +267,41 @@ class Operatory:
             await self._redis.ltrim(klyuch, -_HRANIT_ID, -1)
         except Exception as e:  # noqa: BLE001
             log_oshibka(f"Оператор: не записал id входящего зеркала {klyuch}: {e}")
+
+    # ── Журнал заведённых контактов (дедуп «номер под менеджером», баг 4) ─────
+
+    async def lead_zaveden(self, kod, chat, msg_id) -> bool:
+        """Заводили ли уже контакт в amoCRM по этому входящему клиента с номером?
+
+        Баг 4: клиент оставил номер, пока чат ведёт менеджер (бот молчит) — номер
+        всё равно заводим в amoCRM, но ровно один раз на сообщение, иначе каждый
+        тик поллинга/зеркала плодил бы новую задачу менеджеру. Край как у
+        `operator_zerkalen`: перекос в «уже заведено» (лишняя задача менеджеру
+        хуже пропуска) — пустой id и сбой кеша → True (пропускаем)."""
+        if not msg_id:
+            return True
+        klyuch = self._kl_lead(kod, chat)
+        if self._redis is None:
+            return str(msg_id) in self._lead_zaveden.get(klyuch, [])
+        try:
+            spisok = await self._redis.lrange(klyuch, 0, -1)
+            return str(msg_id) in [_dekod(x) for x in spisok]
+        except Exception as e:  # noqa: BLE001 — не проверили → не заводим (без дублей задач)
+            log_oshibka(f"Оператор: не прочитал журнал заведённых контактов {klyuch}: {e}")
+            return True
+
+    async def zapomnit_lead_zaveden(self, kod, chat, msg_id) -> None:
+        """Пометить входящее с номером как уже заведённое в amoCRM (дедуп бага 4)."""
+        if not msg_id:
+            return
+        klyuch = self._kl_lead(kod, chat)
+        if self._redis is None:
+            spisok = self._lead_zaveden.setdefault(klyuch, [])
+            spisok.append(str(msg_id))
+            del spisok[:-_HRANIT_ID]
+            return
+        try:
+            await self._redis.rpush(klyuch, str(msg_id))
+            await self._redis.ltrim(klyuch, -_HRANIT_ID, -1)
+        except Exception as e:  # noqa: BLE001
+            log_oshibka(f"Оператор: не записал id заведённого контакта {klyuch}: {e}")

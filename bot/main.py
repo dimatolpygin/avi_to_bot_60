@@ -92,10 +92,12 @@ def _kanal_avito(kod: str, cfg: Config, yadro: Yadro, stop: asyncio.Event,
                 logger.info("🪞 Авито «%s»: диалог зеркалируется в amoCRM%s", kod,
                             " (клиент+бот)" if ref else " (пока только входящие клиента)")
                 await avito.zapustit(kod, acc, yadro, stop, belyy_spisok=spisok,
-                                     zerkalo=z, zhurnal=zhurnal, operatory=operatory)
+                                     zerkalo=z, zhurnal=zhurnal, operatory=operatory,
+                                     zavesti_lead=yadro.zavesti_kontakt_pri_perehvate)
             return
         await avito.zapustit(kod, acc, yadro, stop, belyy_spisok=spisok,
-                             zhurnal=zhurnal, operatory=operatory)
+                             zhurnal=zhurnal, operatory=operatory,
+                             zavesti_lead=yadro.zavesti_kontakt_pri_perehvate)
     return zapustit
 
 
