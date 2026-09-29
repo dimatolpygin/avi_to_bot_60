@@ -251,7 +251,14 @@ class Zerkalo:
 
     def _klient(self, chat_id: str, avtor_id, imya: str | None,
                 telefon: str | None = None) -> dict:
-        return _uchastnik(f"avito:{avtor_id or chat_id}",
+        # id участника ИЗОЛИРОВАН по аккаунту (`avito:{kod}:…`, а не `avito:{id}`).
+        # Один и тот же покупатель Авито пишет на несколько наших аккаунтов с ОДНИМ
+        # user_id — без кода аккаунта amojo склеивал бы его чаты sbsauna/дешман/
+        # saunamart в ОДИН контакт CRM, и `nayti_sdelku_po_chatu` тянул бы сделки
+        # (и ответственного) чужого аккаунта: лид одного аккаунта уходил в задачи
+        # менеджера другого (жалоба заказчика 24.09). Код аккаунта в id даёт жёсткую
+        # привязку аккаунт↔контакт без пересечений.
+        return _uchastnik(f"avito:{self.kod}:{avtor_id or chat_id}",
                           imya or "Клиент Авито", telefon)
 
     def _bot(self) -> dict:

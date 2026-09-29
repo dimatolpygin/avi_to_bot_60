@@ -86,7 +86,7 @@ async def test_new_message_idet_na_scope_id():
     async with AmojoAPI(CFG, client=client) as api:
         await api.new_message(payload_soobshcheniya(
             conversation_id="sbsauna:c1", msgid="avito:m1",
-            sender={"id": "avito:42", "name": "Клиент Авито"}, tekst="привет"))
+            sender={"id": "avito:sbsauna:42", "name": "Клиент Авито"}, tekst="привет"))
 
     assert zahvat["path"] == "/v2/origin/custom/chan_acc"          # scope_id в пути
     assert zahvat["telo"]["event_type"] == "new_message"
@@ -178,7 +178,7 @@ async def test_zerkalo_vhodyashchee_sender_klient():
     await _zerkalo_zahvat(zahvat).vhodyashchee("c1", "m1", 42, "сколько стоит")
     p = zahvat[0]
     assert p["conversation_id"] == "sbsauna:c1"
-    assert p["sender"]["id"] == "avito:42" and "receiver" not in p
+    assert p["sender"]["id"] == "avito:sbsauna:42" and "receiver" not in p
 
 
 async def test_zerkalo_ishodyashchee_bez_ref_id_ne_shlet():
@@ -195,7 +195,7 @@ async def test_zerkalo_ishodyashchee_s_ref_id_bot_i_klient():
     p = zahvat[0]
     assert p["sender"]["id"] == "bot:sbsauna" and p["sender"]["name"] == "Роман"
     assert p["sender"]["ref_id"] == "U-REF"          # помечает бота как CRM-сторону
-    assert p["receiver"]["id"] == "avito:42"
+    assert p["receiver"]["id"] == "avito:sbsauna:42"
 
 
 async def test_zerkalo_vlozhenie_s_url_shlet_media():
@@ -205,7 +205,7 @@ async def test_zerkalo_vlozhenie_s_url_shlet_media():
         {"tip": "picture", "url": "https://u/p.jpg", "imya": "photo.jpg", "razmer": None})
     p = zahvat[0]
     assert p["conversation_id"] == "sbsauna:c1"
-    assert p["sender"]["id"] == "avito:42" and "receiver" not in p   # клиент, входящее
+    assert p["sender"]["id"] == "avito:sbsauna:42" and "receiver" not in p   # клиент, входящее
     assert p["message"] == {"type": "picture", "media": "https://u/p.jpg",
                             "file_name": "photo.jpg"}
 
@@ -338,7 +338,7 @@ async def test_obrabotchik_zerkalit_vlozhenie_klienta():
 
 async def test_kanal_zerkalit_ishodyashchee_posle_otpravki():
     api, z = _FakeAPI(), _SpyZerkalo()
-    kanal = _kanal_avito(api, "c1", "avito:42", zerkalo=z, avtor_id=42)
+    kanal = _kanal_avito(api, "c1", "avito:sbsauna:42", zerkalo=z, avtor_id=42)
     await kanal.otpravit("здравствуйте")
 
     assert api.otpravleno == [("c1", "здравствуйте")]              # ушло клиенту
